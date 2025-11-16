@@ -63,3 +63,8 @@ runcmd:
   - 'systemctl restart rabbitmq-server'
   - chmod +x /usr/local/bin/rabbitmq-cluster.sh
   - /usr/local/bin/rabbitmq-cluster.sh
+  
+  # Create admin user for remote access to management UI
+  - 'rabbitmqctl add_user admin <admin_password>'
+  - 'rabbitmqctl set_user_tags admin administrator'
+  - 'rabbitmqctl set_permissions -p / admin ".*" ".*" ".*"'

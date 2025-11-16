@@ -151,7 +151,7 @@ resource "azurerm_linux_virtual_machine" "cluster_vm" {
   name                  = "rabbit-cluster-node-${count.index + 1}"
   resource_group_name   = azurerm_resource_group.rg.name
   location              = azurerm_resource_group.rg.location
-  size                  = var.vm_size
+  size                  = var.rmq_vm_size
   admin_username        = var.admin_username
   custom_data           = base64encode(data.template_file.cluster_init.rendered)
   network_interface_ids = [azurerm_network_interface.cluster_nic[count.index].id]
@@ -169,7 +169,7 @@ resource "azurerm_linux_virtual_machine" "cluster_vm" {
   source_image_reference {
     publisher = "Canonical"
     offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts"
+    sku       = "22_04-lts-gen2"
     version   = "latest"
   }
 }
@@ -197,10 +197,10 @@ resource "azurerm_network_interface" "single_nic" {
 }
 
 resource "azurerm_linux_virtual_machine" "single_vm" {
-  name                  = "rabbit-single-node" # This hostname is used for clarity
+  name                  = "rabbit-single-node"
   resource_group_name   = azurerm_resource_group.rg.name
   location              = azurerm_resource_group.rg.location
-  size                  = var.vm_size
+  size                  = var.rmq_vm_size
   admin_username        = var.admin_username
   custom_data           = base64encode(data.template_file.single_node_init.rendered)
   network_interface_ids = [azurerm_network_interface.single_nic.id]
@@ -218,7 +218,55 @@ resource "azurerm_linux_virtual_machine" "single_vm" {
   source_image_reference {
     publisher = "Canonical"
     offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts"
+    sku       = "22_04-lts-gen2"
+    version   = "latest"
+  }
+}
+
+# Load Generator VM
+resource "azurerm_public_ip" "loadgen_pip" {
+  name                = "rabbit-loadgen-pip"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+}
+
+resource "azurerm_network_interface" "loadgen_nic" {
+  name                = "rabbit-loadgen-nic"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = azurerm_subnet.subnet.id
+    private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.loadgen_pip.id
+  }
+}
+
+resource "azurerm_linux_virtual_machine" "loadgen_vm" {
+  name                  = "rabbit-loadgen-node"
+  resource_group_name   = azurerm_resource_group.rg.name
+  location              = azurerm_resource_group.rg.location
+  size                  = var.load_gen_vm_size
+  admin_username        = var.admin_username
+  network_interface_ids = [azurerm_network_interface.loadgen_nic.id]
+
+  admin_ssh_key {
+    username   = var.admin_username
+    public_key = file(var.admin_ssh_key_path)
+  }
+
+  os_disk {
+    caching              = "ReadWrite"
+    storage_account_type = var.storage_account_type
+  }
+
+  source_image_reference {
+    publisher = "Canonical"
+    offer     = "0001-com-ubuntu-server-jammy"
+    sku       = "22_04-lts-gen2"
     version   = "latest"
   }
 }
