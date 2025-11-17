@@ -17,12 +17,12 @@ provider "azurerm" {
 
 # Setup network resources (VNet, Subnet, Firewall)
 resource "azurerm_resource_group" "rg" {
-  name     = "rabbitmq-benchmark-rg"
+  name     = var.resource_group_name
   location = var.location
 }
 
 resource "azurerm_virtual_network" "vnet" {
-  name                = "rabbitmq-vnet"
+  name                = var.virtual_network_name
   resource_group_name = azurerm_resource_group.rg.name
   location            = azurerm_resource_group.rg.location
   address_space       = ["10.0.0.0/16"]
@@ -58,7 +58,7 @@ resource "azurerm_network_security_group" "nsg" {
     access                     = "Allow"
     protocol                   = "Tcp"
     source_port_range          = "*"
-    destination_port_range     = "15672" 
+    destination_port_range     = "15672"
     source_address_prefix      = "*"
     destination_address_prefix = "*"
   }
@@ -109,23 +109,33 @@ resource "random_string" "erlang_cookie" {
 }
 
 data "template_file" "cluster_init" {
-  template = file("cluster-init.tpl")
+  template = file(var.cluster_nodes.cloud_init_file_path)
   vars = {
-    erlang_cookie = random_string.erlang_cookie.result
+    erlang_cookie     = random_string.erlang_cookie.result
+    cluster_seed_host = format("%s-%02d", var.cluster_nodes.name_prefix, 1)
+    cluster_name      = var.cluster_nodes.cluster_name
   }
 }
 
 data "template_file" "single_node_init" {
-  template = file("single-node-init.tpl")
+  template = file(var.single_node.cloud_init_file_path)
   vars = {
     erlang_cookie = random_string.erlang_cookie.result
   }
 }
 
-# Create the 3 VMs for the RabbitMQ cluster
+data "template_file" "loadgen_init" {
+  count    = var.load_generators.cloud_init_file_path != null ? 1 : 0
+  template = file(var.load_generators.cloud_init_file_path)
+  vars = {
+    erlang_cookie = random_string.erlang_cookie.result
+  }
+}
+
+# Create the VMs for the RabbitMQ cluster
 resource "azurerm_public_ip" "cluster_pip" {
-  count               = 3
-  name                = "rabbit-cluster-pip-${count.index + 1}"
+  count               = var.cluster_nodes.count
+  name                = format("%s-pip-%02d", var.cluster_nodes.name_prefix, count.index + 1)
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   allocation_method   = "Static"
@@ -133,8 +143,8 @@ resource "azurerm_public_ip" "cluster_pip" {
 }
 
 resource "azurerm_network_interface" "cluster_nic" {
-  count               = 3
-  name                = "rabbit-cluster-nic-${count.index + 1}"
+  count               = var.cluster_nodes.count
+  name                = format("%s-nic-%02d", var.cluster_nodes.name_prefix, count.index + 1)
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
 
@@ -147,36 +157,37 @@ resource "azurerm_network_interface" "cluster_nic" {
 }
 
 resource "azurerm_linux_virtual_machine" "cluster_vm" {
-  count                 = 3
-  name                  = "rabbit-cluster-node-${count.index + 1}"
+  count                 = var.cluster_nodes.count
+  name                  = format("%s-%02d", var.cluster_nodes.name_prefix, count.index + 1)
   resource_group_name   = azurerm_resource_group.rg.name
   location              = azurerm_resource_group.rg.location
-  size                  = var.rmq_vm_size
-  admin_username        = var.admin_username
+  size                  = var.cluster_nodes.size
+  admin_username        = var.cluster_nodes.admin_username
   custom_data           = base64encode(data.template_file.cluster_init.rendered)
   network_interface_ids = [azurerm_network_interface.cluster_nic[count.index].id]
 
   admin_ssh_key {
-    username   = var.admin_username
-    public_key = file(var.admin_ssh_key_path)
+    username   = var.cluster_nodes.admin_username
+    public_key = file(var.cluster_nodes.admin_ssh_key_path)
   }
 
   os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = var.storage_account_type
+    caching              = var.cluster_nodes.os_disk.caching
+    storage_account_type = var.cluster_nodes.os_disk.storage_account_type
   }
 
   source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
-    version   = "latest"
+    publisher = var.cluster_nodes.source_image.publisher
+    offer     = var.cluster_nodes.source_image.offer
+    sku       = var.cluster_nodes.source_image.sku
+    version   = var.cluster_nodes.source_image.version
   }
 }
 
 # Single VM for the single RabbitMQ node setup
 resource "azurerm_public_ip" "single_pip" {
-  name                = "rabbit-single-pip"
+  count               = var.single_node.enabled ? 1 : 0
+  name                = "${var.single_node.name}-pip"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   allocation_method   = "Static"
@@ -184,7 +195,8 @@ resource "azurerm_public_ip" "single_pip" {
 }
 
 resource "azurerm_network_interface" "single_nic" {
-  name                = "rabbit-single-nic"
+  count               = var.single_node.enabled ? 1 : 0
+  name                = "${var.single_node.name}-nic"
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
 
@@ -192,40 +204,42 @@ resource "azurerm_network_interface" "single_nic" {
     name                          = "internal"
     subnet_id                     = azurerm_subnet.subnet.id
     private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = azurerm_public_ip.single_pip.id
+    public_ip_address_id          = azurerm_public_ip.single_pip[count.index].id
   }
 }
 
 resource "azurerm_linux_virtual_machine" "single_vm" {
-  name                  = "rabbit-single-node"
+  count                 = var.single_node.enabled ? 1 : 0
+  name                  = var.single_node.name
   resource_group_name   = azurerm_resource_group.rg.name
   location              = azurerm_resource_group.rg.location
-  size                  = var.rmq_vm_size
-  admin_username        = var.admin_username
+  size                  = var.single_node.size
+  admin_username        = var.single_node.admin_username
   custom_data           = base64encode(data.template_file.single_node_init.rendered)
-  network_interface_ids = [azurerm_network_interface.single_nic.id]
+  network_interface_ids = [azurerm_network_interface.single_nic[count.index].id]
 
   admin_ssh_key {
-    username   = var.admin_username
-    public_key = file(var.admin_ssh_key_path)
+    username   = var.single_node.admin_username
+    public_key = file(var.single_node.admin_ssh_key_path)
   }
 
   os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = var.storage_account_type
+    caching              = var.single_node.os_disk.caching
+    storage_account_type = var.single_node.os_disk.storage_account_type
   }
 
   source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
-    version   = "latest"
+    publisher = var.single_node.source_image.publisher
+    offer     = var.single_node.source_image.offer
+    sku       = var.single_node.source_image.sku
+    version   = var.single_node.source_image.version
   }
 }
 
-# Load Generator VM
+# Load Generator VMs
 resource "azurerm_public_ip" "loadgen_pip" {
-  name                = "rabbit-loadgen-pip"
+  count               = var.load_generators.count
+  name                = format("%s-pip-%02d", var.load_generators.name_prefix, count.index + 1)
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
   allocation_method   = "Static"
@@ -233,7 +247,8 @@ resource "azurerm_public_ip" "loadgen_pip" {
 }
 
 resource "azurerm_network_interface" "loadgen_nic" {
-  name                = "rabbit-loadgen-nic"
+  count               = var.load_generators.count
+  name                = format("%s-nic-%02d", var.load_generators.name_prefix, count.index + 1)
   location            = azurerm_resource_group.rg.location
   resource_group_name = azurerm_resource_group.rg.name
 
@@ -241,32 +256,34 @@ resource "azurerm_network_interface" "loadgen_nic" {
     name                          = "internal"
     subnet_id                     = azurerm_subnet.subnet.id
     private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = azurerm_public_ip.loadgen_pip.id
+    public_ip_address_id          = azurerm_public_ip.loadgen_pip[count.index].id
   }
 }
 
 resource "azurerm_linux_virtual_machine" "loadgen_vm" {
-  name                  = "rabbit-loadgen-node"
+  count                 = var.load_generators.count
+  name                  = format("%s-%02d", var.load_generators.name_prefix, count.index + 1)
   resource_group_name   = azurerm_resource_group.rg.name
   location              = azurerm_resource_group.rg.location
-  size                  = var.load_gen_vm_size
-  admin_username        = var.admin_username
-  network_interface_ids = [azurerm_network_interface.loadgen_nic.id]
+  size                  = var.load_generators.size
+  admin_username        = var.load_generators.admin_username
+  custom_data           = var.load_generators.cloud_init_file_path != null ? base64encode(data.template_file.loadgen_init[0].rendered) : null
+  network_interface_ids = [azurerm_network_interface.loadgen_nic[count.index].id]
 
   admin_ssh_key {
-    username   = var.admin_username
-    public_key = file(var.admin_ssh_key_path)
+    username   = var.load_generators.admin_username
+    public_key = file(var.load_generators.admin_ssh_key_path)
   }
 
   os_disk {
-    caching              = "ReadWrite"
-    storage_account_type = var.storage_account_type
+    caching              = var.load_generators.os_disk.caching
+    storage_account_type = var.load_generators.os_disk.storage_account_type
   }
 
   source_image_reference {
-    publisher = "Canonical"
-    offer     = "0001-com-ubuntu-server-jammy"
-    sku       = "22_04-lts-gen2"
-    version   = "latest"
+    publisher = var.load_generators.source_image.publisher
+    offer     = var.load_generators.source_image.offer
+    sku       = var.load_generators.source_image.sku
+    version   = var.load_generators.source_image.version
   }
 }

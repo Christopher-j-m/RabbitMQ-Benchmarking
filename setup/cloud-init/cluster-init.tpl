@@ -19,13 +19,13 @@ runcmd:
 
   # Create script to handle cluster formation
   - |
-    cat <<'EOF' >/usr/local/bin/rabbitmq-cluster.sh
+    cat <<'SCRIPT_EOF' >/usr/local/bin/rabbitmq-cluster.sh
     #!/usr/bin/env bash
     set -euo pipefail
 
     # Configuration vars
-    SEED_NODE="rabbit-cluster-node-1"
-    CLUSTER_NAME="rmq-benchmark-cluster"
+    SEED_NODE="${cluster_seed_host}"
+    CLUSTER_NAME="${cluster_name}"
     RETRIES=12
     SLEEP_SECONDS=5
 
@@ -56,7 +56,7 @@ runcmd:
     sudo rabbitmqctl stop_app
     sudo rabbitmqctl join_cluster "rabbit@$SEED_NODE"
     sudo rabbitmqctl start_app
-    EOF
+    SCRIPT_EOF
 
   # Enable management plugin, restart (or rather initial start) RabbitMQ and run cluster script
   - 'rabbitmq-plugins enable rabbitmq_management'
@@ -65,6 +65,6 @@ runcmd:
   - /usr/local/bin/rabbitmq-cluster.sh
   
   # Create admin user for remote access to management UI
-  - 'rabbitmqctl add_user admin <admin_password>'
+  - 'rabbitmqctl add_user admin password?123'
   - 'rabbitmqctl set_user_tags admin administrator'
   - 'rabbitmqctl set_permissions -p / admin ".*" ".*" ".*"'
