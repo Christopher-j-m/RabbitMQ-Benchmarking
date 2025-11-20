@@ -124,7 +124,7 @@ variable "load_generators" {
     size                 = "Standard_D2as_v6"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
-    cloud_init_file_path = null
+    cloud_init_file_path = "cloud-init/loadgen-node-init.tpl"
     os_disk = {
       storage_account_type = "Premium_LRS"
       caching              = "ReadWrite"

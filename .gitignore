@@ -209,6 +209,9 @@ __marimo__/
 # VM configuration
 utility/config.txt
 
+# Terraform files
+*.tfstate
+
 # Results from benchmarking
 results/
 *.csv

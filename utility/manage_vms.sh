@@ -58,7 +58,7 @@ echo ""
 # Check if config file exists
 if [[ ! -f "$CONFIG_FILE" ]]; then
     print_error "Configuration file '$CONFIG_FILE' not found!"
-    print_info "Please run 'cd setup && terraform apply' first to generate the config file."
+    print_info "Please run 'terraform apply' first to generate the config file."
     exit 1
 fi
 

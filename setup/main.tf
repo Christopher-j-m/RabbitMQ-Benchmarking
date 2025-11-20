@@ -322,7 +322,7 @@ AZURE_RESOURCE_GROUP=${azurerm_resource_group.rg.name}
 AZURE_LOCATION=${azurerm_resource_group.rg.location}
 
 # ============================================================================
-# VM NAMES (for shutdown/startup operations)
+# VM NAMES
 # ============================================================================
 
 # Cluster Node VM Names
