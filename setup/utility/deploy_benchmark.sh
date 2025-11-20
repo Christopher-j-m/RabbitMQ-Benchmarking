@@ -99,7 +99,7 @@ deploy_to_vm() {
     # Copy files (only diffs => faster for repeated deployments)
     print_info "[$vm_index] Copying files..."
     for item in "${FILES_TO_COPY[@]}"; do
-        if [[ -e "$SCRIPT_DIR/../$item" ]]; then
+        if [[ -e "$SCRIPT_DIR/../../$item" ]]; then
             print_info "[$vm_index]   -> $item"
             rsync -az --relative -e "ssh -i $SSH_KEY_PATH $SSH_OPTS" \
                 --exclude='__pycache__' \
@@ -108,7 +108,7 @@ deploy_to_vm() {
                 --exclude='results/' \
                 --exclude='.venv/' \
                 --exclude='venv/' \
-                "$SCRIPT_DIR/.././$item" "$REMOTE_USER@$ip:$REMOTE_DIR/"
+                "$SCRIPT_DIR/../.././$item" "$REMOTE_USER@$ip:$REMOTE_DIR/"
         else
             print_warn "[$vm_index]   -> $item not found, skipping"
         fi

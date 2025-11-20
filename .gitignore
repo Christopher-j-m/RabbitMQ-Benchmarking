@@ -207,7 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 # VM configuration
-utility/config.txt
+setup/utility/config.txt
 
 # Terraform files
 *.tfstate
