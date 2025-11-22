@@ -99,6 +99,39 @@ resource "azurerm_network_security_group" "nsg" {
     source_address_prefix      = "VirtualNetwork"
     destination_address_prefix = "VirtualNetwork"
   }
+  security_rule {
+    name                       = "AllowGrafana"
+    priority                   = 150
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "3000"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+  security_rule {
+    name                       = "AllowPrometheus"
+    priority                   = 160
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "9090"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+  security_rule {
+    name                       = "AllowRabbitMQPrometheus"
+    priority                   = 170
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "15692"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
 }
 
 resource "azurerm_subnet_network_security_group_association" "nsg_assoc" {
