@@ -41,7 +41,7 @@ variable "cluster_nodes" {
     count                = 3
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
-    size                 = "Standard_B2s"
+    size                 = "Standard_D2s_v5"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/cluster-init.tpl"
@@ -81,7 +81,7 @@ variable "single_node" {
   default = {
     enabled              = true
     name                 = "rabbit-single-node"
-    size                 = "Standard_B2s"
+    size                 = "Standard_D2s_v5"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/single-node-init.tpl"
@@ -121,7 +121,7 @@ variable "load_generators" {
   default = {
     count                = 1
     name_prefix          = "rabbit-loadgen-node"
-    size                 = "Standard_D2as_v6"
+    size                 = "Standard_F8s_v2"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/loadgen-node-init.tpl"
