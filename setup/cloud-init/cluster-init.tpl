@@ -203,7 +203,7 @@ runcmd:
   # Source: https://grafana.com/grafana/dashboards/10991-rabbitmq-overview/
   - |
     echo "[$(date)] Importing RabbitMQ Overview dashboard (10991)..."
-    curl -s https://grafana.com/api/dashboards/10991/revisions/15/download -o /tmp/rabbitmq-dashboard-10991.json
+    curl -s https://grafana.com/api/dashboards/10991/revisions/1/download -o /tmp/rabbitmq-dashboard-10991.json
     if [ -f /tmp/rabbitmq-dashboard-10991.json ]; then
       jq -n --slurpfile dashboard /tmp/rabbitmq-dashboard-10991.json \
         '{dashboard: $dashboard[0], overwrite: true, inputs: [{name: "DS_PROMETHEUS", type: "datasource", pluginId: "prometheus", value: "Prometheus"}]}' \
@@ -214,24 +214,7 @@ runcmd:
         -d @/tmp/dashboard-import-10991.json \
         http://localhost:3000/api/dashboards/import || echo "[$(date)] Failed to import dashboard 10991"
     else
-      echo "[$(date)] Failed to download dashboard 10991"
-    fi
-
-  # Source: https://grafana.com/grafana/dashboards/6566-rabbitmq-perftest/
-  - |
-    echo "[$(date)] Importing RabbitMQ Perftest dashboard (6566)..."
-    curl -s https://grafana.com/api/dashboards/6566/revisions/11/download -o /tmp/rabbitmq-dashboard-6566.json
-    if [ -f /tmp/rabbitmq-dashboard-6566.json ]; then
-      jq -n --slurpfile dashboard /tmp/rabbitmq-dashboard-6566.json \
-        '{dashboard: $dashboard[0], overwrite: true, inputs: [{name: "DS_PROMETHEUS", type: "datasource", pluginId: "prometheus", value: "Prometheus"}]}' \
-        > /tmp/dashboard-import-6566.json
-      
-      curl -X POST -H "Content-Type: application/json" \
-        -u admin:admin \
-        -d @/tmp/dashboard-import-6566.json \
-        http://localhost:3000/api/dashboards/import || echo "[$(date)] Failed to import dashboard 6566"
-    else
-      echo "[$(date)] Failed to download dashboard 6566"
+      echo "[$(date)] Failed to download dashboard"
     fi
   
   - 'echo "[$(date)] Monitoring setup complete"'

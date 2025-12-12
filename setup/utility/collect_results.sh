@@ -1,14 +1,13 @@
 #!/bin/bash
-# Deploy benchmark tool to load generator VM(s)
+# Collect benchmark results from load generator VM(s)
 
 # Params
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.txt"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-BENCHMARK_DIR="$SCRIPT_DIR/../../benchmark"
-BINARY_NAME="rmq-benchmark"
+LOCAL_RESULTS_DIR="$SCRIPT_DIR/../../results"
 
-# Format out, adapted from: https://labex.io/tutorials/shell-how-to-format-strings-in-bash-scripts-400162#adding-color-and-style-to-bash-output
+# Format out
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -62,40 +61,33 @@ if [[ ! -f "$SSH_KEY_PATH" ]]; then
 fi
 
 # Parse VM names into array & trim whitespaces
-# Adapted from: https://unix.stackexchange.com/questions/184863/
 IFS=',' read -ra VM_ARRAY <<< "$LOAD_GENERATOR_IPS"
 for i in "${!VM_ARRAY[@]}"; do
     VM_ARRAY[$i]=$(echo "${VM_ARRAY[$i]}" | xargs)
 done
 
-print_info "Starting deployment of benchmarking tool to ${#VM_ARRAY[@]} load generator VM(s)..."
+print_info "Starting collection of benchmark results from ${#VM_ARRAY[@]} load generator VM(s)..."
 print_info "SSH Key-Path: $SSH_KEY_PATH"
 print_info "User: $REMOTE_USER"
+print_info "Local Results Directory: $LOCAL_RESULTS_DIR"
 echo ""
 
-# Build the Go binary
-print_step "Building Go binary..."
-if [[ ! -d "$BENCHMARK_DIR" ]]; then
-    print_error "Benchmark directory not found at: $BENCHMARK_DIR"
+# Check if rsync is available
+if ! command -v rsync &>/dev/null; then
+    print_error "rsync is not installed. Please install it first:"
     exit 1
 fi
 
-cd "$BENCHMARK_DIR"
-if ! go build -o "$BINARY_NAME" .; then
-    print_error "Failed to build Go binary"
-    exit 1
-fi
-print_info "Binary built successfully: $BINARY_NAME"
-cd - > /dev/null
-echo ""
+# Create local results directory if it doesn't exist
+mkdir -p "$LOCAL_RESULTS_DIR"
 
-REMOTE_DIR="/home/$REMOTE_USER/benchmarking"
+REMOTE_RESULTS_DIR="/home/$REMOTE_USER/benchmarking/results"
 
-deploy_to_vm() {
+collect_from_vm() {
     local ip=$1
     local vm_index=$2
     
-    print_info "[$vm_index] Deploying to $REMOTE_USER@$ip..."
+    print_info "[$vm_index] Collecting results from $REMOTE_USER@$ip..."
     
     # Test SSH connection
     if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" "echo 'SSH connection successful'" &>/dev/null; then
@@ -103,34 +95,47 @@ deploy_to_vm() {
         return 1
     fi
     
-    # Create remote directory
-    print_info "[$vm_index] Creating remote directory: $REMOTE_DIR"
-    ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" "mkdir -p $REMOTE_DIR"
-    
-    # Copy binary
-    print_info "[$vm_index] Copying benchmark binary..."
-    if [[ -f "$BENCHMARK_DIR/$BINARY_NAME" ]]; then
-        scp -i "$SSH_KEY_PATH" $SSH_OPTS "$BENCHMARK_DIR/$BINARY_NAME" "$REMOTE_USER@$ip:$REMOTE_DIR/"
-    else
-        print_error "[$vm_index] Binary not found at $BENCHMARK_DIR/$BINARY_NAME"
-        return 1
+    # Check if remote results directory exists
+    if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" "test -d $REMOTE_RESULTS_DIR" &>/dev/null; then
+        print_warn "[$vm_index] Results directory not found at $REMOTE_RESULTS_DIR on $ip"
+        return 0
     fi
     
-    # Make binary executable
-    ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" \
-        "chmod +x $REMOTE_DIR/$BINARY_NAME"
+    # Count files in remote results directory
+    file_count=$(ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" \
+        "find $REMOTE_RESULTS_DIR -type f 2>/dev/null | wc -l")
     
-    print_info "[$vm_index] Deployment to $ip completed successfully!"
-    return 0
+    if [[ "$file_count" -eq 0 ]]; then
+        print_warn "[$vm_index] No result files found on $ip"
+        return 0
+    fi
+    
+    print_info "[$vm_index] Found $file_count result file(s)"
+    
+    # Create subdirectory for this VM
+    vm_local_dir="$LOCAL_RESULTS_DIR/vm_${ip//./_}"
+    mkdir -p "$vm_local_dir"
+    
+    # Copy results using rsync (preserves timestamps)
+    print_info "[$vm_index] Copying results to $vm_local_dir..."
+    if rsync -avz -e "ssh -i $SSH_KEY_PATH $SSH_OPTS" \
+        "$REMOTE_USER@$ip:$REMOTE_RESULTS_DIR/" "$vm_local_dir/" &>/dev/null; then
+        print_info "[$vm_index] Results copied successfully from $ip!"
+        return 0
+    else
+        print_error "[$vm_index] Failed to copy results from $ip using rsync"
+        return 1
+    fi
 }
 
-# Collect results of the successful/failed deployments
+# Collect results from all VMs
 SUCCESS_COUNT=0
 FAILURE_COUNT=0
+EMPTY_COUNT=0
 
 for i in "${!VM_ARRAY[@]}"; do
     vm_index=$((i + 1))
-    if deploy_to_vm "${VM_ARRAY[$i]}" "$vm_index"; then
+    if collect_from_vm "${VM_ARRAY[$i]}" "$vm_index"; then
         SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
     else
         FAILURE_COUNT=$((FAILURE_COUNT + 1))
@@ -138,9 +143,9 @@ for i in "${!VM_ARRAY[@]}"; do
     echo ""
 done
 
-# Print summary of operations
+# Print summary
 echo "========================================"
-print_info "Deployment Summary:"
+print_info "Collection Summary:"
 print_info "  Successful: $SUCCESS_COUNT"
 if [[ $FAILURE_COUNT -gt 0 ]]; then
     print_error "  Failed: $FAILURE_COUNT"
@@ -153,4 +158,7 @@ if [[ $FAILURE_COUNT -gt 0 ]]; then
     exit 1
 fi
 
-print_info "Benchmark tool deployed successfully to all load generators!"
+# Count total collected files
+total_files=$(find "$LOCAL_RESULTS_DIR" -type f 2>/dev/null | wc -l)
+print_info "Total files collected: $total_files"
+print_info "Results saved to: $LOCAL_RESULTS_DIR"
