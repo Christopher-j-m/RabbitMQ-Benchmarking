@@ -12,7 +12,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"net/url"
 	"rmq-benchmark/metrics"
 	"rmq-benchmark/rmq"
@@ -31,25 +31,23 @@ type LinearCapacity struct {
 	payloads [][]byte
 }
 
-func (e *LinearCapacity) Name() string {
-	return "linear-capacity"
-}
-
 func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 	e.config = config
 	e.ctrl = ctrl
 
 	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
-	// => prevents delays in the worker routines during the measurement
+	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
 	e.payloads = make([][]byte, 1000)
 	for i := range e.payloads {
-		size := 1024 + rand.Intn(4096)
+		size := 1024 + rand.IntN(4096)
 		text := faker.Paragraph()
 		b := make([]byte, size)
 		copy(b, text)
 		if len(text) < size {
-			rand.Read(b[len(text):])
+			for j := len(text); j < size; j++ {
+				b[j] = byte(rand.IntN(256))
+			}
 		}
 		e.payloads[i] = b
 	}
@@ -110,7 +108,7 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 	return nil
 }
 
-func (e *LinearCapacity) Run(ctx context.Context, workers int, rec *metrics.Recorder) (metrics.Summary, error) {
+func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
 
 	// Start a routine for each connection to listen for amqp.Blocking alarms.
@@ -204,28 +202,38 @@ func (e *LinearCapacity) Run(ctx context.Context, workers int, rec *metrics.Reco
 	}
 
 	// --- Start Publishers ---
-	// Distribute the total number of workers equally across all queues
-	workersPerNode := workers / len(e.conns)
-	if workersPerNode == 0 {
-		workersPerNode = 1
+	// Distribute the total number of publishers equally across all queues
+	publishersPerNode := publishers / len(e.conns)
+	if publishersPerNode == 0 {
+		publishersPerNode = 1
 	}
 
+	log.Printf("Starting %d publishers per node (Total: %d)...", publishersPerNode, publishers)
+
+	publisherCounter := 0
 	for i, conn := range e.conns {
 		queueName := e.queues[i]
 
-		for w := 0; w < workersPerNode; w++ {
+		for w := 0; w < publishersPerNode; w++ {
+			publisherID := publisherCounter
+			publisherCounter++
 			wg.Add(1)
-			go func(c *amqp.Connection, q string) {
+			go func(c *amqp.Connection, q string, pid int) {
 				defer wg.Done()
+
+				// Avoid global mutex contention on rand by using own RNG per publisher
+				// => https://go.dev/blog/randv2
+				rng := rand.New(rand.NewPCG(uint64(pid), uint64(time.Now().UnixNano())))
+
 				ch, err := c.Channel()
 				if err != nil {
-					log.Printf("Worker failed to create channel: %v", err)
+					log.Printf("Publisher failed to create channel: %v", err)
 					return
 				}
 				defer ch.Close()
 
 				if err := ch.Confirm(false); err != nil {
-					log.Printf("Worker failed to enable confirms: %v", err)
+					log.Printf("Publisher failed to enable confirms: %v", err)
 					return
 				}
 
@@ -235,14 +243,26 @@ func (e *LinearCapacity) Run(ctx context.Context, workers int, rec *metrics.Reco
 				confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 2000))
 
 				// Background routing to handle the async acks from rmq
+				// Records in batches to reduce mutex contention in the recorder, since we expect high throughput here
+				// => Locking a mutex for every single message would cause contention and therefore reduce throughput of load generator
 				go func() {
+					const batchSize = 100
+					latencyBatch := make([]int64, 0, batchSize)
 					for conf := range confirms {
 						if conf.Ack {
 							// For capacity tests, we measure throughput not individual latency
-							rec.RecordLatency(0)
+							latencyBatch = append(latencyBatch, 0)
+							if len(latencyBatch) >= batchSize {
+								rec.RecordLatencyBatch(latencyBatch)
+								latencyBatch = latencyBatch[:0]
+							}
 						} else {
 							rec.RecordError()
 						}
+					}
+					// Flush remaining
+					if len(latencyBatch) > 0 {
+						rec.RecordLatencyBatch(latencyBatch)
 					}
 				}()
 
@@ -253,7 +273,7 @@ func (e *LinearCapacity) Run(ctx context.Context, workers int, rec *metrics.Reco
 						return
 					default:
 						// Select a random, pre-generated payload that we created during setup
-						payload := e.payloads[rand.Intn(len(e.payloads))]
+						payload := e.payloads[rng.IntN(len(e.payloads))]
 
 						// Publish the message
 						err := ch.PublishWithContext(ctx,
@@ -274,7 +294,7 @@ func (e *LinearCapacity) Run(ctx context.Context, workers int, rec *metrics.Reco
 						}
 					}
 				}
-			}(conn, queueName)
+			}(conn, queueName, publisherID)
 		}
 	}
 

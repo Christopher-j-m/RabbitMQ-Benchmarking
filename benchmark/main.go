@@ -29,7 +29,7 @@ var (
 	msgSize        int
 	warmup         int
 	duration       int
-	workers        int
+	publishers     int
 	consumers      int
 	experimentName string
 )
@@ -51,9 +51,21 @@ func main() {
 	rootCmd.Flags().IntVar(&msgSize, "msg-size", 1024, "Message Size in Bytes")
 	rootCmd.Flags().IntVar(&warmup, "warmup", 5, "Warmup duration in seconds")
 	rootCmd.Flags().IntVar(&duration, "duration", 30, "Test duration in seconds")
-	rootCmd.Flags().IntVar(&workers, "workers", 10, "Number of concurrent workers")
+	rootCmd.Flags().IntVar(&publishers, "publishers", 10, "Number of concurrent publishers")
 	rootCmd.Flags().IntVar(&consumers, "consumers", 0, "Number of concurrent consumers")
-	rootCmd.Flags().StringVar(&experimentName, "experiment", "raft-tax", "Experiment to run: raft-tax, linear-capacity, proxy-tax") // TODO: Get it from registered experiments
+
+	experimentsList := experiments.ListExperiments()
+	helpText := fmt.Sprintf("Experiment to run: %v", experimentsList)
+	rootCmd.Flags().StringVar(&experimentName, "experiment", experiments.ExperimentRaftLatency, helpText)
+
+	// Require at least one parameter
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		if len(os.Args) <= 1 {
+			fmt.Println("[Error] At least one parameter is required.")
+			cmd.Help()
+			os.Exit(1)
+		}
+	}
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -83,6 +95,20 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	multiWriter := io.MultiWriter(os.Stdout, f)
 	log.SetOutput(multiWriter)
 
+	// Log CLI arguments
+	// Omit Management URL connection string for hiding credentials
+	log.Printf("Benchmark Parameters:")
+	log.Printf("  Experiment: %s", experimentName)
+	log.Printf("  Mgmt URL: %s", mgmtURL)
+	log.Printf("  Queue: %s", queueName)
+	log.Printf("  Quorum Size: %d", quorumSize)
+	log.Printf("  Msg Size (bytes): %d", msgSize)
+	log.Printf("  Warmup (seconds): %d", warmup)
+	log.Printf("  Duration (seconds): %d", duration)
+	log.Printf("  Publishers: %d", publishers)
+	log.Printf("  Consumers: %d", consumers)
+	log.Println("---------------------------------------------------")
+
 	// Setup Controller for RabbitMQ Management API interactions
 	ctrl := rmq.NewController(mgmtURL, user, password)
 
@@ -101,19 +127,19 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		MsgSize:         msgSize,
 		WarmupSeconds:   warmup,
 		DurationSeconds: duration,
+		Publishers:      publishers,
 		Consumers:       consumers,
 	}
 
 	// Setup Experiment with the config
-	log.Printf("Setting up experiment: %s", exp.Name())
 	if err := exp.Setup(config, ctrl); err != nil {
 		log.Fatalf("Setup failed: %v", err)
 	}
 	defer exp.Teardown()
 
 	// Create the Metrics Recorder & start recording
-	// TODO: Make custom Recorders defineable per experiment (to keep being extensible	)
-	rec, err := metrics.NewRecorder(exp.Name(), warmup)
+	// TODO: Make custom Recorders defineable per experiment (to keep being extensible)
+	rec, err := metrics.NewRecorder(experimentName, warmup)
 	if err != nil {
 		log.Fatalf("Failed to create recorder: %v", err)
 	}
@@ -134,13 +160,13 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 
 		// Force exit if another interrupt is received
 		<-sigChan
-		log.Println("\n[FORCE EXIT] Forcing exit...")
+		log.Println("\n[INTERRUPT] Forcing exit...")
 		os.Exit(130)
 	}()
 
 	// Run the Experiment
 	log.Printf("Running experiment for %d seconds...", duration)
-	summary, err := exp.Run(ctx, workers, rec)
+	summary, err := exp.Run(ctx, publishers, rec)
 	if err != nil {
 		log.Printf("Experiment finished with error: %v", err)
 	}

@@ -1,9 +1,9 @@
-// Raft Tax Experiment
+// Raft Latency Experiment
 //
-// Measures the latency cost imposed by the Raft consensus mechanism
-// in rmq quorum queues. This experiment forces publishers to wait for a
-// confirmed write (ACK) from the cluster for every message, measuring the
-// round-trip time required for successful replication across replicas in the cluster.
+// Measures the latency cost imposed by the Raft consensus in rmq quorum queues.
+// This experiment forces publishers to wait for a confirmed write (ACK)
+// from the cluster for every message, measuring the round-trip time required for
+// successful replication across replicas in the cluster.
 //
 // Publishers: Send messages synchronously, waiting for a ack before sending the next one.
 // Consumers: Consume messages immediately to prevent queue backlog from influencing latency measurements.
@@ -14,7 +14,7 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"math/rand"
+	"math/rand/v2"
 	"net/url"
 	"rmq-benchmark/metrics"
 	"rmq-benchmark/rmq"
@@ -25,32 +25,30 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type RaftTax struct {
+type RaftLatency struct {
 	config   Config
 	ctrl     *rmq.Controller
 	conn     *amqp.Connection
 	payloads [][]byte
 }
 
-func (e *RaftTax) Name() string {
-	return "raft-tax"
-}
-
-func (e *RaftTax) Setup(config Config, ctrl *rmq.Controller) error {
+func (e *RaftLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	e.config = config
 	e.ctrl = ctrl
 
 	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
-	// => prevents delays in the worker routines during the measurement
+	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
 	e.payloads = make([][]byte, 1000)
 	for i := range e.payloads {
-		size := 1024 + rand.Intn(4096)
+		size := 1024 + rand.IntN(4096)
 		text := faker.Paragraph()
 		b := make([]byte, size)
 		copy(b, text)
 		if len(text) < size {
-			rand.Read(b[len(text):])
+			for j := len(text); j < size; j++ {
+				b[j] = byte(rand.IntN(256))
+			}
 		}
 		e.payloads[i] = b
 	}
@@ -105,7 +103,7 @@ func (e *RaftTax) Setup(config Config, ctrl *rmq.Controller) error {
 	return nil
 }
 
-func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (metrics.Summary, error) {
+func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
 
 	// Listen for amqp.Blocking alarms on the connection with the leader node.
@@ -183,16 +181,22 @@ func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (
 			}()
 		}
 	}
-	
+
 	// --- Start Publishers ---
-    // Workers publish and wait for a ack for every message
-	for i := 0; i < workers; i++ {
+	// Publishers publish and wait for a ack for every message
+	log.Printf("Starting %d publishers...", publishers)
+	for i := 0; i < publishers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(publisherID int) {
 			defer wg.Done()
+
+			// Local RNG to avoid global mutex contention
+			// => https://go.dev/blog/randv2
+			rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
+
 			ch, err := e.conn.Channel()
 			if err != nil {
-				log.Printf("Worker failed to create channel: %v", err)
+				log.Printf("Publisher failed to create channel: %v", err)
 				return
 			}
 			defer ch.Close()
@@ -203,7 +207,7 @@ func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (
 			// => Mandatory for measuring the Raft replication latency,
 			// ... which is the main objective of this experiment
 			if err := ch.Confirm(false); err != nil {
-				log.Printf("Worker failed to enable confirms: %v", err)
+				log.Printf("Publisher failed to enable confirms: %v", err)
 				return
 			}
 
@@ -213,12 +217,20 @@ func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (
 			// => Message throughput is effectively throttled by the Raft consensus latency
 			confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
 
+			// Local batch for latency recording
+			const batchSize = 100
+			latencyBatch := make([]int64, 0, batchSize)
+
 			for {
 				select {
 				case <-ctx.Done():
+					// Flush remaining latencies
+					if len(latencyBatch) > 0 {
+						rec.RecordLatencyBatch(latencyBatch)
+					}
 					return
 				default:
-					payload := e.payloads[rand.Intn(len(e.payloads))]
+					payload := e.payloads[rng.IntN(len(e.payloads))]
 
 					// Start Timer
 					start := time.Now()
@@ -226,9 +238,9 @@ func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (
 					// Publish the message
 					err := ch.PublishWithContext(ctx,
 						"",                 // exchange - default: route to queue with name equal to routing key
-                        e.config.QueueName, // routing key (queue name)
-                        false,              // mandatory - unroutable messages are dropped
-                        false,              // immediate - no immediate delivery
+						e.config.QueueName, // routing key (queue name)
+						false,              // mandatory - unroutable messages are dropped
+						false,              // immediate - no immediate delivery
 						amqp.Publishing{
 							ContentType: "text/plain",
 							Body:        payload,
@@ -237,38 +249,45 @@ func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (
 
 					if err != nil {
 						if err == amqp.ErrClosed {
+							if len(latencyBatch) > 0 {
+								rec.RecordLatencyBatch(latencyBatch)
+							}
 							return
 						}
 						// Backoff on error
 						rec.RecordError()
-						time.Sleep(50 * time.Millisecond) 
+						time.Sleep(50 * time.Millisecond)
 						continue
 					}
 
 					// Block until the Raft consensus completes and the server sends an ACK.
-                    // This time is recorded as the publish latency.
+					// This time is recorded as the publish latency.
 					select {
 					case conf := <-confirms:
 						if conf.Ack {
 							// Record the full round-trip time
-							rec.RecordLatency(time.Since(start))
+							latencyBatch = append(latencyBatch, time.Since(start).Microseconds())
+							if len(latencyBatch) >= batchSize {
+								rec.RecordLatencyBatch(latencyBatch)
+								latencyBatch = latencyBatch[:0]
+							}
 						} else {
 							// Nack or error
 							rec.RecordError()
 						}
-					
+
 					// Handle cases where rmq is overloaded and doesn't respond in time
 					// This allows us to capture latency spikes without erroring out
 					case <-time.After(30 * time.Second):
-						log.Printf("Worker timed out waiting for confirm")
+						log.Printf("Publisher timed out waiting for confirm")
 						rec.RecordError()
 
 						// Our last resort: backoff for 1-3 seconds before trying again
-						time.Sleep(time.Duration(1000+rand.Intn(2000)) * time.Millisecond)
+						time.Sleep(time.Duration(1000+rng.IntN(2000)) * time.Millisecond)
 					}
 				}
 			}
-		}()
+		}(i)
 	}
 
 	// Wait for the go context to be canceled and all coroutines to exit gracefully
@@ -276,7 +295,7 @@ func (e *RaftTax) Run(ctx context.Context, workers int, rec *metrics.Recorder) (
 	return rec.GetSummary(), nil
 }
 
-func (e *RaftTax) Teardown() error {
+func (e *RaftLatency) Teardown() error {
 	if e.conn != nil {
 		return e.conn.Close()
 	}

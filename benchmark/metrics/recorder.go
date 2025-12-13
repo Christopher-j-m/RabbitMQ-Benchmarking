@@ -9,14 +9,20 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/HdrHistogram/hdrhistogram-go"
 )
 
+type LatencyBatch struct {
+	Latencies []int64
+}
+
 // Central component for capturing and aggregating all performance data.
 // It uses a windowed approach to calculate metrics over short intervals and a global
 // approach to determine final statistics after the warmup period.
+// Uses channel-based batching to reduce mutex contention.
 type Recorder struct {
 	filename   string
 	warmup     time.Duration // Duration to skip before counting metrics (to reach steady state)
@@ -43,6 +49,10 @@ type Recorder struct {
 	// For summary stats
 	throughputSamples []float64 // Stores throughput (messages/sec) for each interval after warmup
 	errorCount        int64     // Total count of errors recorded after warmup
+
+	// Batching channels
+	latencyChan chan LatencyBatch
+	batchWg     sync.WaitGroup
 }
 
 func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
@@ -79,9 +89,9 @@ func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
 	w.Flush()
 
 	return &Recorder{
-		filename:          filename,
-		warmup:            time.Duration(warmupSeconds) * time.Second,
-		windowSize:        1 * time.Second,
+		filename:   filename,
+		warmup:     time.Duration(warmupSeconds) * time.Second,
+		windowSize: 1 * time.Second,
 		// HdrHistograms setup: min=1us, max=10min (600,000,000us), significant figures=3
 		windowHistogram:   hdrhistogram.New(1, 600000000, 3),
 		globalHistogram:   hdrhistogram.New(1, 600000000, 3),
@@ -89,6 +99,7 @@ func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
 		file:              f,
 		done:              make(chan struct{}),
 		throughputSamples: make([]float64, 0),
+		latencyChan:       make(chan LatencyBatch, 1000),
 	}, nil
 }
 
@@ -97,32 +108,61 @@ func (r *Recorder) Start() {
 	r.startTime = time.Now()
 	r.wg.Add(1)
 	go r.loop()
+
+	// Start batch processor routine
+	r.batchWg.Add(1)
+	go r.processBatches()
 }
 
-// Records a single latency measurement and converts it to microseconds for recording in the HdrHistogram.
-func (r *Recorder) RecordLatency(latency time.Duration) {
-	us := latency.Microseconds()
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Handles incoming latency batches
+func (r *Recorder) processBatches() {
+	defer r.batchWg.Done()
+	for batch := range r.latencyChan {
+		r.mu.Lock()
+		// Exclude measurements during warmup
+		if time.Since(r.startTime) > r.warmup {
+			for _, us := range batch.Latencies {
+				r.windowHistogram.RecordValue(us)
+				r.windowMsgCount++
+				r.globalHistogram.RecordValue(us)
+				r.globalMsgCount++
+			}
+		}
+		r.mu.Unlock()
+	}
+}
 
-	// TODO: Do I want to include warmup in global histogram and filter it out during analysis or directly exclude it here?
-	// Record to window histogram for CSV
-	r.windowHistogram.RecordValue(us)
-	r.windowMsgCount++
-
-	// Only record to global stats if warmup has passed (Summary stats)
-	if time.Since(r.startTime) > r.warmup {
-		r.globalHistogram.RecordValue(us)
-		r.globalMsgCount++
+// RecordLatencyBatch submits a batch of latency measurements (in microseconds) to the recorder.
+// This is more efficient than calling RecordLatency for each measurement.
+func (r *Recorder) RecordLatencyBatch(latenciesUs []int64) {
+	if len(latenciesUs) == 0 {
+		return
+	}
+	// Make a copy to avoid data races
+	batch := make([]int64, len(latenciesUs))
+	copy(batch, latenciesUs)
+	select {
+	case r.latencyChan <- LatencyBatch{Latencies: batch}:
+	default:
+		// Channel full, fall back to direct recording
+		r.mu.Lock()
+		// Exclude measurements during warmup
+		if time.Since(r.startTime) > r.warmup {
+			for _, us := range latenciesUs {
+				r.windowHistogram.RecordValue(us)
+				r.windowMsgCount++
+				r.globalHistogram.RecordValue(us)
+				r.globalMsgCount++
+			}
+		}
+		r.mu.Unlock()
 	}
 }
 
 // Increments the error counter, but only after the warmup period.
 func (r *Recorder) RecordError() {
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	if time.Since(r.startTime) > r.warmup {
-		r.errorCount++
+		atomic.AddInt64(&r.errorCount, 1)
 	}
 }
 
@@ -157,21 +197,21 @@ func (r *Recorder) flushWindow(t time.Time) {
 	p99 := r.windowHistogram.ValueAtQuantile(99)
 	stdDev := r.windowHistogram.StdDev()
 
-	// Write to CSV
-	record := []string{
-		fmt.Sprintf("%.2f", elapsed),
-		fmt.Sprintf("%d", count),
-		fmt.Sprintf("%.2f", mean),
-		fmt.Sprintf("%d", p50),
-		fmt.Sprintf("%d", p95),
-		fmt.Sprintf("%d", p99),
-		fmt.Sprintf("%.2f", stdDev),
-	}
-	r.csvWriter.Write(record)
-	r.csvWriter.Flush()
-
-	// Store throughput for summary if past warmup
+	// Write to CSV only if warmup period has passed
 	if elapsed > r.warmup.Seconds() {
+		record := []string{
+			fmt.Sprintf("%.2f", elapsed),
+			fmt.Sprintf("%d", count),
+			fmt.Sprintf("%.2f", mean),
+			fmt.Sprintf("%d", p50),
+			fmt.Sprintf("%d", p95),
+			fmt.Sprintf("%d", p99),
+			fmt.Sprintf("%.2f", stdDev),
+		}
+		r.csvWriter.Write(record)
+		r.csvWriter.Flush()
+
+		// Store throughput for summary
 		r.throughputSamples = append(r.throughputSamples, float64(count))
 	}
 
@@ -184,6 +224,10 @@ func (r *Recorder) flushWindow(t time.Time) {
 func (r *Recorder) Stop() {
 	close(r.done)
 	r.wg.Wait()
+
+	close(r.latencyChan)
+	r.batchWg.Wait()
+
 	r.file.Close()
 }
 
@@ -228,6 +272,6 @@ func (r *Recorder) GetSummary() Summary {
 		MeanThroughput:   mean,
 		StdDevThroughput: stdDev,
 		GlobalP99Latency: r.globalHistogram.ValueAtQuantile(99),
-		TotalErrorCount:  r.errorCount,
+		TotalErrorCount:  atomic.LoadInt64(&r.errorCount),
 	}
 }
