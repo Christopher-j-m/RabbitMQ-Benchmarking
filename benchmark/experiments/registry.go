@@ -7,18 +7,20 @@ import (
 
 // Experiment Names
 const (
-	ExperimentRaftLatency    = "raft-latency"
+	ExperimentIdealLatency   = "ideal-latency"
 	ExperimentLinearCapacity = "linear-capacity"
 	ExperimentProxyLatency   = "proxy-latency"
+	ExperimentStressLatency  = "stress-latency"
 )
 
 type Factory func() Experiment
 
 // Mapping of experiment names to their constructors.
 var registry = map[string]Factory{
-	ExperimentRaftLatency:    func() Experiment { return &RaftLatency{} },
+	ExperimentIdealLatency:   func() Experiment { return &IdealLatency{} },
 	ExperimentLinearCapacity: func() Experiment { return &LinearCapacity{} },
 	ExperimentProxyLatency:   func() Experiment { return &ProxyLatency{} },
+	ExperimentStressLatency:  func() Experiment { return &StressLatency{} },
 }
 
 // Returns a new instance of the specified experiment.

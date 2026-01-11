@@ -4,10 +4,11 @@
 // This experiment forces publishers to wait for a confirmed write (ACK)
 // from the cluster for every message, measuring the round-trip time required for
 // successful replication across replicas in the cluster.
+// => Inject timestamp into message headers for end-to-end latency calculation.
 //
 // Publishers: Send messages synchronously, waiting for a ack before sending the next one.
 // Consumers: Consume messages immediately to prevent queue backlog from influencing latency measurements.
-// Metrics: Latency (P99, P95, Mean) and Throughput (msgs/sec)
+// Metrics: Latency (P99, P95, Mean) 
 package experiments
 
 import (
@@ -25,14 +26,14 @@ import (
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
-type RaftLatency struct {
+type IdealLatency struct {
 	config   Config
 	ctrl     *rmq.Controller
 	conn     *amqp.Connection
 	payloads [][]byte
 }
 
-func (e *RaftLatency) Setup(config Config, ctrl *rmq.Controller) error {
+func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	e.config = config
 	e.ctrl = ctrl
 
@@ -103,7 +104,7 @@ func (e *RaftLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	return nil
 }
 
-func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
+func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
 
 	// Listen for amqp.Blocking alarms on the connection with the leader node.
@@ -125,15 +126,14 @@ func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Reco
 		}
 	}()
 
-	// --- Start Consumers ---
-	// Consumers are started to drain the queue immediately.
-	// This prevents the queue from building up back pressure,
-	// isolating the latency measurement to Raft consensus (and not queue depth).
+	// CONSUMERS
+	// Consumers are started to drain the queue immediately and record end-to-end latency.
+	// They extract the timestamp from the message header and calculate the latency.
 	if e.config.Consumers > 0 {
 		log.Printf("Starting %d consumers...", e.config.Consumers)
 		for i := 0; i < e.config.Consumers; i++ {
 			wg.Add(1)
-			go func() {
+			go func(rec *metrics.Recorder) {
 				defer wg.Done()
 
 				ch, err := e.conn.Channel()
@@ -166,23 +166,48 @@ func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Reco
 					return
 				}
 
-				// Acknowledge messages as they arrive
+				// Local batch for latency recording to avoid lock contention
+				const batchSize = 100
+				latencyBatch := make([]int64, 0, batchSize)
+
+				// Consume messages and record end-to-end latency
 				for {
 					select {
 					case <-ctx.Done():
+						// Flush remaining latencies
+						if len(latencyBatch) > 0 {
+							rec.RecordLatencyBatch(latencyBatch)
+						}
 						return
 					case d, ok := <-msgs:
 						if !ok {
+							if len(latencyBatch) > 0 {
+								rec.RecordLatencyBatch(latencyBatch)
+							}
 							return
 						}
+
+						// Extract timestamp from header and calculate end-to-end latency
+						if sentAt, ok := d.Headers["x-sent-at"]; ok {
+							if sentTimestamp, ok := sentAt.(int64); ok {
+								latencyNs := time.Now().UnixNano() - sentTimestamp
+								latencyUs := latencyNs / 1000 // Convert to microseconds
+								latencyBatch = append(latencyBatch, latencyUs)
+								if len(latencyBatch) >= batchSize {
+									rec.RecordLatencyBatch(latencyBatch)
+									latencyBatch = latencyBatch[:0]
+								}
+							}
+						}
+
 						d.Ack(false)
 					}
 				}
-			}()
+			}(rec)
 		}
 	}
 
-	// --- Start Publishers ---
+	// PUBLISHERS
 	// Publishers publish and wait for a ack for every message
 	log.Printf("Starting %d publishers...", publishers)
 	for i := 0; i < publishers; i++ {
@@ -217,25 +242,14 @@ func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Reco
 			// => Message throughput is effectively throttled by the Raft consensus latency
 			confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
 
-			// Local batch for latency recording
-			const batchSize = 100
-			latencyBatch := make([]int64, 0, batchSize)
-
 			for {
 				select {
 				case <-ctx.Done():
-					// Flush remaining latencies
-					if len(latencyBatch) > 0 {
-						rec.RecordLatencyBatch(latencyBatch)
-					}
 					return
 				default:
 					payload := e.payloads[rng.IntN(len(e.payloads))]
 
-					// Start Timer
-					start := time.Now()
-
-					// Publish the message
+					// Publish the message with timestamp header for end-to-end latency calculation
 					err := ch.PublishWithContext(ctx,
 						"",                 // exchange - default: route to queue with name equal to routing key
 						e.config.QueueName, // routing key (queue name)
@@ -243,15 +257,13 @@ func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Reco
 						false,              // immediate - no immediate delivery
 						amqp.Publishing{
 							ContentType: "text/plain",
+							Headers:     amqp.Table{"x-sent-at": time.Now().UnixNano()},
 							Body:        payload,
 						},
 					)
 
 					if err != nil {
 						if err == amqp.ErrClosed {
-							if len(latencyBatch) > 0 {
-								rec.RecordLatencyBatch(latencyBatch)
-							}
 							return
 						}
 						// Backoff on error
@@ -261,17 +273,11 @@ func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Reco
 					}
 
 					// Block until the Raft consensus completes and the server sends an ACK.
-					// This time is recorded as the publish latency.
+					// This ensures the cluster is stressed by waiting for replication.
+					// Latency is recorded by consumers, not here.
 					select {
 					case conf := <-confirms:
-						if conf.Ack {
-							// Record the full round-trip time
-							latencyBatch = append(latencyBatch, time.Since(start).Microseconds())
-							if len(latencyBatch) >= batchSize {
-								rec.RecordLatencyBatch(latencyBatch)
-								latencyBatch = latencyBatch[:0]
-							}
-						} else {
+						if !conf.Ack {
 							// Nack or error
 							rec.RecordError()
 						}
@@ -295,7 +301,7 @@ func (e *RaftLatency) Run(ctx context.Context, publishers int, rec *metrics.Reco
 	return rec.GetSummary(), nil
 }
 
-func (e *RaftLatency) Teardown() error {
+func (e *IdealLatency) Teardown() error {
 	if e.conn != nil {
 		return e.conn.Close()
 	}

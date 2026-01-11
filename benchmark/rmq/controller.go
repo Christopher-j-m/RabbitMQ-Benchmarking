@@ -29,8 +29,8 @@ func NewController(mgmtURL, user, password string) *Controller {
 
 // JSON fields returned by the Management API for a specific queue endpoint (api/queues/vhost/queueName).
 type QueueInfo struct {
-    Node   string `json:"node"`   // The Erlang node name where the queue is located (e.g., rabbit@hostname)
-    Leader string `json:"leader"` // The leader node name for Quorum queues
+	Node   string `json:"node"`   // The Erlang node name where the queue is located (e.g., rabbit@hostname)
+	Leader string `json:"leader"` // The leader node name for Quorum queues
 }
 
 // Query the RabbitMQ Management API to find out which node is the leader for the given queue.

@@ -83,7 +83,7 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 		qName := fmt.Sprintf("%s-%d", config.QueueName, i)
 		e.queues[i] = qName
 
-		// Configure the queue as a quorum queue with the specified initial group size.
+		// Configure the queue as a quorum queue with the replication group size.
 		args := amqp.Table{
 			"x-queue-type":                "quorum",
 			"x-quorum-initial-group-size": config.QuorumSize,
@@ -135,15 +135,11 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 		}(nodeName, blockings)
 	}
 
-	// --- Start Consumers ---
-	// Distribute the total number of consumers equally across all created queues
+	// Start the specified number of consumers on each queue
 	if e.config.Consumers > 0 {
-		consumersPerQueue := e.config.Consumers / len(e.queues)
-		if consumersPerQueue == 0 && e.config.Consumers > 0 {
-			consumersPerQueue = 1
-		}
+		consumersPerQueue := e.config.Consumers
 
-		log.Printf("Starting %d consumers per queue (Total: %d)...", consumersPerQueue, e.config.Consumers)
+		log.Printf("Starting %d consumers per queue (Total: %d)...", consumersPerQueue, e.config.Consumers*len(e.queues))
 
 		for i, conn := range e.conns {
 			queueName := e.queues[i]
@@ -201,14 +197,10 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 		}
 	}
 
-	// --- Start Publishers ---
-	// Distribute the total number of publishers equally across all queues
-	publishersPerNode := publishers / len(e.conns)
-	if publishersPerNode == 0 {
-		publishersPerNode = 1
-	}
+	// Start the specified number of publishers on each node
+	publishersPerNode := publishers
 
-	log.Printf("Starting %d publishers per node (Total: %d)...", publishersPerNode, publishers)
+	log.Printf("Starting %d publishers per node (Total: %d)...", publishersPerNode, publishers*len(e.conns))
 
 	publisherCounter := 0
 	for i, conn := range e.conns {

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy benchmark tool to load generator VM(s)
+# Deploy benchmark tool to load generator VM
 
 # Params
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -8,7 +8,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLeve
 BENCHMARK_DIR="$SCRIPT_DIR/../../benchmark"
 BINARY_NAME="rmq-benchmark"
 
-# Format out, adapted from: https://labex.io/tutorials/shell-how-to-format-strings-in-bash-scripts-400162#adding-color-and-style-to-bash-output
+# Format out
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -46,8 +46,8 @@ if [[ -z "$SSH_KEY_PATH" ]]; then
     exit 1
 fi
 
-if [[ -z "$LOAD_GENERATOR_IPS" ]]; then
-    print_error "LOAD_GENERATOR_IPS is not set in $CONFIG_FILE"
+if [[ -z "$LOAD_GENERATOR_IP" ]]; then
+    print_error "LOAD_GENERATOR_IP is not set in $CONFIG_FILE"
     exit 1
 fi
 
@@ -61,20 +61,9 @@ if [[ ! -f "$SSH_KEY_PATH" ]]; then
     exit 1
 fi
 
-# Parse VM names into array & trim whitespaces
-# Adapted from: https://unix.stackexchange.com/questions/184863/
-IFS=',' read -ra VM_ARRAY <<< "$LOAD_GENERATOR_IPS"
-for i in "${!VM_ARRAY[@]}"; do
-    VM_ARRAY[$i]=$(echo "${VM_ARRAY[$i]}" | xargs)
-done
-
-print_info "Starting deployment of benchmarking tool to ${#VM_ARRAY[@]} load generator VM(s)..."
-print_info "SSH Key-Path: $SSH_KEY_PATH"
-print_info "User: $REMOTE_USER"
-echo ""
+print_info "Deploying benchmarking tool to $LOAD_GENERATOR_IP..."
 
 # Build the Go binary
-print_step "Building Go binary..."
 if [[ ! -d "$BENCHMARK_DIR" ]]; then
     print_error "Benchmark directory not found at: $BENCHMARK_DIR"
     exit 1
@@ -85,72 +74,31 @@ if ! go build -o "$BINARY_NAME" .; then
     print_error "Failed to build Go binary"
     exit 1
 fi
-print_info "Binary built successfully: $BINARY_NAME"
 cd - > /dev/null
-echo ""
 
 REMOTE_DIR="/home/$REMOTE_USER/benchmarking"
 
-deploy_to_vm() {
-    local ip=$1
-    local vm_index=$2
-    
-    print_info "[$vm_index] Deploying to $REMOTE_USER@$ip..."
-    
-    # Test SSH connection
-    if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" "echo 'SSH connection successful'" &>/dev/null; then
-        print_error "[$vm_index] Failed to connect to $ip via SSH"
-        return 1
-    fi
-    
-    # Create remote directory
-    print_info "[$vm_index] Creating remote directory: $REMOTE_DIR"
-    ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" "mkdir -p $REMOTE_DIR"
-    
-    # Copy binary
-    print_info "[$vm_index] Copying benchmark binary..."
-    if [[ -f "$BENCHMARK_DIR/$BINARY_NAME" ]]; then
-        scp -i "$SSH_KEY_PATH" $SSH_OPTS "$BENCHMARK_DIR/$BINARY_NAME" "$REMOTE_USER@$ip:$REMOTE_DIR/"
-    else
-        print_error "[$vm_index] Binary not found at $BENCHMARK_DIR/$BINARY_NAME"
-        return 1
-    fi
-    
-    # Make binary executable
-    ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$ip" \
-        "chmod +x $REMOTE_DIR/$BINARY_NAME"
-    
-    print_info "[$vm_index] Deployment to $ip completed successfully!"
-    return 0
-}
-
-# Collect results of the successful/failed deployments
-SUCCESS_COUNT=0
-FAILURE_COUNT=0
-
-for i in "${!VM_ARRAY[@]}"; do
-    vm_index=$((i + 1))
-    if deploy_to_vm "${VM_ARRAY[$i]}" "$vm_index"; then
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-    else
-        FAILURE_COUNT=$((FAILURE_COUNT + 1))
-    fi
-    echo ""
-done
-
-# Print summary of operations
-echo "========================================"
-print_info "Deployment Summary:"
-print_info "  Successful: $SUCCESS_COUNT"
-if [[ $FAILURE_COUNT -gt 0 ]]; then
-    print_error "  Failed: $FAILURE_COUNT"
-else
-    print_info "  Failed: $FAILURE_COUNT"
-fi
-echo "========================================"
-
-if [[ $FAILURE_COUNT -gt 0 ]]; then
+# Test SSH connection
+if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "echo 'SSH connection successful'" &>/dev/null; then
+    print_error "Failed to connect to $LOAD_GENERATOR_IP via SSH"
     exit 1
 fi
 
-print_info "Benchmark tool deployed successfully to all load generators!"
+# Create remote directory
+ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "mkdir -p $REMOTE_DIR"
+
+# Copy binary
+if [[ -f "$BENCHMARK_DIR/$BINARY_NAME" ]]; then
+    if ! scp -i "$SSH_KEY_PATH" $SSH_OPTS "$BENCHMARK_DIR/$BINARY_NAME" "$REMOTE_USER@$LOAD_GENERATOR_IP:$REMOTE_DIR/" &>/dev/null; then
+        print_error "Failed to copy benchmark binary to $LOAD_GENERATOR_IP"
+        exit 1
+    fi
+else
+    print_error "Binary not found at $BENCHMARK_DIR/$BINARY_NAME"
+    exit 1
+fi
+
+# Make binary executable
+ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "chmod +x $REMOTE_DIR/$BINARY_NAME"
+
+print_info "Benchmark tool copied to load generator VM"

@@ -4,3 +4,5 @@ package_upgrade: true
 
 packages:
   - golang-go
+  - iotop
+  - ifstat

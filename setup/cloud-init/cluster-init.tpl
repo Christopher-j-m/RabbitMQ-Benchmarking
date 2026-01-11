@@ -9,6 +9,8 @@ packages:
   - grafana
   - curl
   - jq
+  - iotop
+  - ifstat
 
 runcmd:
   # Set the shared Erlang cookie & Nodename env var
@@ -125,10 +127,9 @@ runcmd:
   - /usr/local/bin/rabbitmq-cluster.sh
   
   # Create admin user for remote access to management UI
-  # TODO: Paramerterize admin credentials inside of variables.tf
-  - 'rabbitmqctl add_user admin password?123'
-  - 'rabbitmqctl set_user_tags admin administrator'
-  - 'rabbitmqctl set_permissions -p / admin ".*" ".*" ".*"'
+  - 'rabbitmqctl add_user ${rabbitmq_username} ${rabbitmq_password}'
+  - 'rabbitmqctl set_user_tags ${rabbitmq_username} administrator'
+  - 'rabbitmqctl set_permissions -p / ${rabbitmq_username} ".*" ".*" ".*"'
   
   # Verify Prometheus plugin is working
   - |
@@ -199,7 +200,7 @@ runcmd:
       -d '{"name":"Prometheus","type":"prometheus","url":"http://localhost:9090","access":"proxy","isDefault":true}' \
       http://localhost:3000/api/datasources || echo "[$(date)] Failed to add datasource (may already exist)"
   
-  # Download and import RabbitMQ Grafana dashboards. Sources:
+  # Download and import RabbitMQ Grafana dashboard. Source:
   # Source: https://grafana.com/grafana/dashboards/10991-rabbitmq-overview/
   - |
     echo "[$(date)] Importing RabbitMQ Overview dashboard (10991)..."

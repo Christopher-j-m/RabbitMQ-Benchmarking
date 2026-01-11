@@ -2,11 +2,11 @@
 //
 // Measures the additional latency cost imposed by publishing through a non-leader
 // node in rmq quorum queues, while using the same synchronous publishing pattern as
-// raft_latency.
+// ideal_latency.
 //
 // Publishers: Send messages synchronously to a non-leader node, waiting for ACK before sending the next one.
 // Consumers: Consume messages immediately to prevent queue backlog from influencing latency measurements.
-// Metrics: Latency (P99, P95, Mean) and Throughput (msgs/sec)
+// Metrics: Latency (P99, P95, Mean)
 package experiments
 
 import (
@@ -122,7 +122,6 @@ func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	return nil
 }
 
-// TODO: This entire Run method is mostly copied from raft_latency.go => re-use common code
 func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
 
@@ -145,7 +144,7 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 		}
 	}()
 
-	// --- Start Consumers ---
+	// CONSUMERS
 	// Consumers are started to drain the queue immediately.
 	// This prevents the queue from building up back pressure,
 	// isolating the latency measurement to Raft consensus + proxy overhead (and not queue depth).
@@ -202,7 +201,7 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 		}
 	}
 
-	// --- Start Publishers ---
+	// PUBLISHERS
 	// Publishers publish synchronously and wait for an ACK for every message.
 	log.Printf("Starting %d publishers...", publishers)
 	for i := 0; i < publishers; i++ {
