@@ -16,6 +16,19 @@ variable "virtual_network_name" {
   default     = "rabbitmq-vnet"
 }
 
+variable "rabbitmq_admin_username" {
+  description = "Username for the RabbitMQ admin user."
+  type        = string
+  default     = "admin"
+}
+
+variable "rabbitmq_admin_password" {
+  description = "Password for the RabbitMQ admin user. If not specified, a random password will be generated."
+  type        = string
+  default     = null
+  sensitive   = true
+}
+
 variable "cluster_nodes" {
   description = "Configuration for the RabbitMQ cluster VMs."
   type = object({
@@ -29,6 +42,7 @@ variable "cluster_nodes" {
     os_disk = object({
       storage_account_type = string
       caching              = string
+      disk_size_gb         = number
     })
     source_image = object({
       publisher = string
@@ -41,53 +55,14 @@ variable "cluster_nodes" {
     count                = 3
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
-    size                 = "Standard_B2s"
+    size                 = "Standard_D2s_v5"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/cluster-init.tpl"
     os_disk = {
       storage_account_type = "Premium_LRS"
       caching              = "ReadWrite"
-    }
-    source_image = {
-      publisher = "Canonical"
-      offer     = "0001-com-ubuntu-server-jammy"
-      sku       = "22_04-lts-gen2"
-      version   = "latest"
-    }
-  }
-}
-
-variable "single_node" {
-  description = "Configuration for the standalone RabbitMQ VM."
-  type = object({
-    enabled              = bool
-    name                 = string
-    size                 = string
-    admin_username       = string
-    admin_ssh_key_path   = string
-    cloud_init_file_path = string
-    os_disk = object({
-      storage_account_type = string
-      caching              = string
-    })
-    source_image = object({
-      publisher = string
-      offer     = string
-      sku       = string
-      version   = string
-    })
-  })
-  default = {
-    enabled              = true
-    name                 = "rabbit-single-node"
-    size                 = "Standard_B2s"
-    admin_username       = "azureuser"
-    admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
-    cloud_init_file_path = "../cloud-init/single-node-init.tpl"
-    os_disk = {
-      storage_account_type = "Premium_LRS"
-      caching              = "ReadWrite"
+      disk_size_gb         = 30
     }
     source_image = {
       publisher = "Canonical"
@@ -110,6 +85,7 @@ variable "load_generators" {
     os_disk = object({
       storage_account_type = string
       caching              = string
+      disk_size_gb         = number
     })
     source_image = object({
       publisher = string
@@ -121,13 +97,14 @@ variable "load_generators" {
   default = {
     count                = 1
     name_prefix          = "rabbit-loadgen-node"
-    size                 = "Standard_D2as_v6"
+    size                 = "Standard_F8s_v2"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/loadgen-node-init.tpl"
     os_disk = {
       storage_account_type = "Premium_LRS"
       caching              = "ReadWrite"
+      disk_size_gb         = 30
     }
     source_image = {
       publisher = "Canonical"

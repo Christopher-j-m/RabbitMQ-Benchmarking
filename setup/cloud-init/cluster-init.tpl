@@ -9,6 +9,8 @@ packages:
   - grafana
   - curl
   - jq
+  - iotop
+  - ifstat
 
 runcmd:
   # Set the shared Erlang cookie & Nodename env var
@@ -125,10 +127,9 @@ runcmd:
   - /usr/local/bin/rabbitmq-cluster.sh
   
   # Create admin user for remote access to management UI
-  # TODO: Paramerterize admin credentials inside of variables.tf
-  - 'rabbitmqctl add_user admin password?123'
-  - 'rabbitmqctl set_user_tags admin administrator'
-  - 'rabbitmqctl set_permissions -p / admin ".*" ".*" ".*"'
+  - 'rabbitmqctl add_user ${rabbitmq_username} ${rabbitmq_password}'
+  - 'rabbitmqctl set_user_tags ${rabbitmq_username} administrator'
+  - 'rabbitmqctl set_permissions -p / ${rabbitmq_username} ".*" ".*" ".*"'
   
   # Verify Prometheus plugin is working
   - |
@@ -199,11 +200,11 @@ runcmd:
       -d '{"name":"Prometheus","type":"prometheus","url":"http://localhost:9090","access":"proxy","isDefault":true}' \
       http://localhost:3000/api/datasources || echo "[$(date)] Failed to add datasource (may already exist)"
   
-  # Download and import RabbitMQ Grafana dashboards. Sources:
+  # Download and import RabbitMQ Grafana dashboard. Source:
   # Source: https://grafana.com/grafana/dashboards/10991-rabbitmq-overview/
   - |
     echo "[$(date)] Importing RabbitMQ Overview dashboard (10991)..."
-    curl -s https://grafana.com/api/dashboards/10991/revisions/15/download -o /tmp/rabbitmq-dashboard-10991.json
+    curl -s https://grafana.com/api/dashboards/10991/revisions/1/download -o /tmp/rabbitmq-dashboard-10991.json
     if [ -f /tmp/rabbitmq-dashboard-10991.json ]; then
       jq -n --slurpfile dashboard /tmp/rabbitmq-dashboard-10991.json \
         '{dashboard: $dashboard[0], overwrite: true, inputs: [{name: "DS_PROMETHEUS", type: "datasource", pluginId: "prometheus", value: "Prometheus"}]}' \
@@ -214,24 +215,7 @@ runcmd:
         -d @/tmp/dashboard-import-10991.json \
         http://localhost:3000/api/dashboards/import || echo "[$(date)] Failed to import dashboard 10991"
     else
-      echo "[$(date)] Failed to download dashboard 10991"
-    fi
-
-  # Source: https://grafana.com/grafana/dashboards/6566-rabbitmq-perftest/
-  - |
-    echo "[$(date)] Importing RabbitMQ Perftest dashboard (6566)..."
-    curl -s https://grafana.com/api/dashboards/6566/revisions/11/download -o /tmp/rabbitmq-dashboard-6566.json
-    if [ -f /tmp/rabbitmq-dashboard-6566.json ]; then
-      jq -n --slurpfile dashboard /tmp/rabbitmq-dashboard-6566.json \
-        '{dashboard: $dashboard[0], overwrite: true, inputs: [{name: "DS_PROMETHEUS", type: "datasource", pluginId: "prometheus", value: "Prometheus"}]}' \
-        > /tmp/dashboard-import-6566.json
-      
-      curl -X POST -H "Content-Type: application/json" \
-        -u admin:admin \
-        -d @/tmp/dashboard-import-6566.json \
-        http://localhost:3000/api/dashboards/import || echo "[$(date)] Failed to import dashboard 6566"
-    else
-      echo "[$(date)] Failed to download dashboard 6566"
+      echo "[$(date)] Failed to download dashboard"
     fi
   
   - 'echo "[$(date)] Monitoring setup complete"'

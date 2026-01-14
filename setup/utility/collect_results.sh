@@ -1,12 +1,11 @@
 #!/bin/bash
-# Deploy benchmark tool to load generator VM
+# Collect benchmark results from load generator VM
 
 # Params
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.txt"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-BENCHMARK_DIR="$SCRIPT_DIR/../../benchmark"
-BINARY_NAME="rmq-benchmark"
+LOCAL_RESULTS_DIR="$SCRIPT_DIR/../../results"
 
 # Format out
 RED='\033[0;31m'
@@ -61,22 +60,18 @@ if [[ ! -f "$SSH_KEY_PATH" ]]; then
     exit 1
 fi
 
-print_info "Deploying benchmarking tool to $LOAD_GENERATOR_IP..."
+print_info "Collecting benchmark results from $LOAD_GENERATOR_IP..."
 
-# Build the Go binary
-if [[ ! -d "$BENCHMARK_DIR" ]]; then
-    print_error "Benchmark directory not found at: $BENCHMARK_DIR"
+# Check if rsync is available
+if ! command -v rsync &>/dev/null; then
+    print_error "rsync is not installed. Please install it first."
     exit 1
 fi
 
-cd "$BENCHMARK_DIR"
-if ! go build -o "$BINARY_NAME" .; then
-    print_error "Failed to build Go binary"
-    exit 1
-fi
-cd - > /dev/null
+# Create local results directory if it doesn't exist
+mkdir -p "$LOCAL_RESULTS_DIR"
 
-REMOTE_DIR="/home/$REMOTE_USER/benchmarking"
+REMOTE_RESULTS_DIR="/home/$REMOTE_USER/benchmarking/results"
 
 # Test SSH connection
 if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "echo 'SSH connection successful'" &>/dev/null; then
@@ -84,21 +79,17 @@ if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "echo 'S
     exit 1
 fi
 
-# Create remote directory
-ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "mkdir -p $REMOTE_DIR"
-
-# Copy binary
-if [[ -f "$BENCHMARK_DIR/$BINARY_NAME" ]]; then
-    if ! scp -i "$SSH_KEY_PATH" $SSH_OPTS "$BENCHMARK_DIR/$BINARY_NAME" "$REMOTE_USER@$LOAD_GENERATOR_IP:$REMOTE_DIR/" &>/dev/null; then
-        print_error "Failed to copy benchmark binary to $LOAD_GENERATOR_IP"
-        exit 1
-    fi
-else
-    print_error "Binary not found at $BENCHMARK_DIR/$BINARY_NAME"
-    exit 1
+# Check if remote results directory exists
+if ! ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "test -d $REMOTE_RESULTS_DIR" &>/dev/null; then
+    print_warn "Results directory not found at $REMOTE_RESULTS_DIR on $LOAD_GENERATOR_IP"
+    exit 0
 fi
 
-# Make binary executable
-ssh -i "$SSH_KEY_PATH" $SSH_OPTS "$REMOTE_USER@$LOAD_GENERATOR_IP" "chmod +x $REMOTE_DIR/$BINARY_NAME"
-
-print_info "Benchmark tool copied to load generator VM"
+# Copy results using rsync
+if rsync -avz -e "ssh -i $SSH_KEY_PATH $SSH_OPTS" \
+    "$REMOTE_USER@$LOAD_GENERATOR_IP:$REMOTE_RESULTS_DIR/" "$LOCAL_RESULTS_DIR/" &>/dev/null; then
+    print_info "Results collected successfully!"
+else
+    print_error "Failed to copy results using rsync"
+    exit 1
+fi

@@ -194,19 +194,6 @@ manage_vm() {
     fi
 }
 
-# Collect results of the start/deallocate operation
-SUCCESS_COUNT=0
-FAILURE_COUNT=0
-for i in "${!FILTERED_VMS[@]}"; do
-    vm_index=$((i + 1))
-    if manage_vm "${FILTERED_VMS[$i]}" "$vm_index"; then
-        SUCCESS_COUNT=$((SUCCESS_COUNT + 1))
-    else
-        FAILURE_COUNT=$((FAILURE_COUNT + 1))
-    fi
-    echo ""
-done
-
 # Wait for all operations to complete (or at least in the ongoing process, even if not yet finished)
 if [[ "$OPERATION" == "start" ]]; then
     print_step "Waiting for all VMs to be in running state..."
@@ -234,36 +221,6 @@ for vm in "${FILTERED_VMS[@]}"; do
             &> /dev/null || print_warn "Timeout waiting for $vm"
     fi
 done
-
-# Print summary of operations
-echo ""
-echo "========================================"
-if [[ "$OPERATION" == "start" ]]; then
-    print_step "Startup Summary"
-    echo "========================================"
-    print_info "Successfully started: $SUCCESS_COUNT VMs"
-else
-    print_step "Shutdown Summary"
-    echo "========================================"
-    print_info "Successfully deallocated: $SUCCESS_COUNT VMs"
-fi
-
-if [[ $FAILURE_COUNT -gt 0 ]]; then
-    print_error "Failed: $FAILURE_COUNT VMs"
-else
-    print_info "Failed: $FAILURE_COUNT VMs"
-fi
-echo "========================================"
-echo ""
-
-if [[ $FAILURE_COUNT -gt 0 ]]; then
-    if [[ "$OPERATION" == "start" ]]; then
-        print_warn "Some VMs failed to start and need to be started manually in the UI."
-    else
-        print_warn "Some VMs failed to deallocate and need to be deallocated manually in the UI."
-    fi
-    exit 1
-fi
 
 if [[ "$OPERATION" == "start" ]]; then
     print_info "All VMs started successfully."

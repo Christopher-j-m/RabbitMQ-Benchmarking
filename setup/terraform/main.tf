@@ -145,19 +145,25 @@ resource "random_string" "erlang_cookie" {
   special = false
 }
 
+resource "random_password" "rabbitmq_password" {
+  count            = var.rabbitmq_admin_password == null ? 1 : 0
+  length           = 16
+  special          = true
+  override_special = "_%@"
+}
+
+locals {
+  rabbitmq_admin_password = var.rabbitmq_admin_password != null ? var.rabbitmq_admin_password : random_password.rabbitmq_password[0].result
+}
+
 data "template_file" "cluster_init" {
   template = file(var.cluster_nodes.cloud_init_file_path)
   vars = {
     erlang_cookie     = random_string.erlang_cookie.result
     cluster_seed_host = format("%s-%02d", var.cluster_nodes.name_prefix, 1)
     cluster_name      = var.cluster_nodes.cluster_name
-  }
-}
-
-data "template_file" "single_node_init" {
-  template = file(var.single_node.cloud_init_file_path)
-  vars = {
-    erlang_cookie = random_string.erlang_cookie.result
+    rabbitmq_password = local.rabbitmq_admin_password
+    rabbitmq_username = var.rabbitmq_admin_username
   }
 }
 
@@ -211,6 +217,7 @@ resource "azurerm_linux_virtual_machine" "cluster_vm" {
   os_disk {
     caching              = var.cluster_nodes.os_disk.caching
     storage_account_type = var.cluster_nodes.os_disk.storage_account_type
+    disk_size_gb         = var.cluster_nodes.os_disk.disk_size_gb
   }
 
   source_image_reference {
@@ -218,58 +225,6 @@ resource "azurerm_linux_virtual_machine" "cluster_vm" {
     offer     = var.cluster_nodes.source_image.offer
     sku       = var.cluster_nodes.source_image.sku
     version   = var.cluster_nodes.source_image.version
-  }
-}
-
-# Single VM for the single RabbitMQ node setup
-resource "azurerm_public_ip" "single_pip" {
-  count               = var.single_node.enabled ? 1 : 0
-  name                = "${var.single_node.name}-pip"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Static"
-  sku                 = "Standard"
-}
-
-resource "azurerm_network_interface" "single_nic" {
-  count               = var.single_node.enabled ? 1 : 0
-  name                = "${var.single_node.name}-nic"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-
-  ip_configuration {
-    name                          = "internal"
-    subnet_id                     = azurerm_subnet.subnet.id
-    private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = azurerm_public_ip.single_pip[count.index].id
-  }
-}
-
-resource "azurerm_linux_virtual_machine" "single_vm" {
-  count                 = var.single_node.enabled ? 1 : 0
-  name                  = var.single_node.name
-  resource_group_name   = azurerm_resource_group.rg.name
-  location              = azurerm_resource_group.rg.location
-  size                  = var.single_node.size
-  admin_username        = var.single_node.admin_username
-  custom_data           = base64encode(data.template_file.single_node_init.rendered)
-  network_interface_ids = [azurerm_network_interface.single_nic[count.index].id]
-
-  admin_ssh_key {
-    username   = var.single_node.admin_username
-    public_key = file(var.single_node.admin_ssh_key_path)
-  }
-
-  os_disk {
-    caching              = var.single_node.os_disk.caching
-    storage_account_type = var.single_node.os_disk.storage_account_type
-  }
-
-  source_image_reference {
-    publisher = var.single_node.source_image.publisher
-    offer     = var.single_node.source_image.offer
-    sku       = var.single_node.source_image.sku
-    version   = var.single_node.source_image.version
   }
 }
 
@@ -315,6 +270,7 @@ resource "azurerm_linux_virtual_machine" "loadgen_vm" {
   os_disk {
     caching              = var.load_generators.os_disk.caching
     storage_account_type = var.load_generators.os_disk.storage_account_type
+    disk_size_gb         = var.load_generators.os_disk.disk_size_gb
   }
 
   source_image_reference {
@@ -331,7 +287,6 @@ resource "null_resource" "generate_utility_config" {
   triggers = {
     all_vm_names = join(",", concat(
       azurerm_linux_virtual_machine.cluster_vm[*].name,
-      length(azurerm_linux_virtual_machine.single_vm) > 0 ? [azurerm_linux_virtual_machine.single_vm[0].name] : [],
       azurerm_linux_virtual_machine.loadgen_vm[*].name
     ))
     load_generator_ips = join(",", azurerm_public_ip.loadgen_pip[*].ip_address)
@@ -361,16 +316,12 @@ AZURE_LOCATION=${azurerm_resource_group.rg.location}
 # Cluster Node VM Names
 CLUSTER_VM_NAMES=${join(",", azurerm_linux_virtual_machine.cluster_vm[*].name)}
 
-# Single Node VM Name
-SINGLE_NODE_VM_NAME=${length(azurerm_linux_virtual_machine.single_vm) > 0 ? azurerm_linux_virtual_machine.single_vm[0].name : ""}
-
 # Load Generator VM Names
 LOAD_GENERATOR_VM_NAMES=${join(",", azurerm_linux_virtual_machine.loadgen_vm[*].name)}
 
 # All VM Names
 ALL_VM_NAMES=${join(",", concat(
     azurerm_linux_virtual_machine.cluster_vm[*].name,
-    length(azurerm_linux_virtual_machine.single_vm) > 0 ? [azurerm_linux_virtual_machine.single_vm[0].name] : [],
     azurerm_linux_virtual_machine.loadgen_vm[*].name
 ))}
 
@@ -389,13 +340,10 @@ REMOTE_USER=${var.load_generators.admin_username}
 # ============================================================================
 
 # Load Generator VM IPs
-LOAD_GENERATOR_IPS=${join(",", azurerm_public_ip.loadgen_pip[*].ip_address)}
+LOAD_GENERATOR_IP=${azurerm_public_ip.loadgen_pip[0].ip_address}
 
 # Cluster Node IPs
 CLUSTER_NODE_IPS=${join(",", azurerm_public_ip.cluster_pip[*].ip_address)}
-
-# Single Node IP
-SINGLE_NODE_IP=${length(azurerm_public_ip.single_pip) > 0 ? azurerm_public_ip.single_pip[0].ip_address : ""}
 
 # ============================================================================
 # VM COUNTS
@@ -404,13 +352,18 @@ SINGLE_NODE_IP=${length(azurerm_public_ip.single_pip) > 0 ? azurerm_public_ip.si
 # Number of each VM type
 CLUSTER_NODE_COUNT=${var.cluster_nodes.count}
 LOAD_GENERATOR_COUNT=${var.load_generators.count}
-SINGLE_NODE_ENABLED=${var.single_node.enabled ? "true" : "false"}
+
+# ============================================================================
+# RABBITMQ CREDENTIALS
+# ============================================================================
+
+RABBITMQ_ADMIN_USER=${var.rabbitmq_admin_username}
+RABBITMQ_ADMIN_PASSWORD=${local.rabbitmq_admin_password}
 EOT
 }
 
 depends_on = [
   azurerm_linux_virtual_machine.cluster_vm,
-  azurerm_linux_virtual_machine.single_vm,
   azurerm_linux_virtual_machine.loadgen_vm
 ]
 }
