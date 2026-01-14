@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,7 +21,6 @@ import (
 
 // Command-line parameters
 var (
-	amqpURL        string
 	mgmtURL        string
 	rmqUser        string
 	rmqPassword    string
@@ -42,7 +42,6 @@ func main() {
 	}
 
 	// Define command-line flags and their default values
-	rootCmd.Flags().StringVar(&amqpURL, "amq-url", "", "RabbitMQ AMQP URL (Required)")
 	rootCmd.Flags().StringVar(&mgmtURL, "mgmt-url", "", "RabbitMQ Management URL (Required)")
 	rootCmd.Flags().StringVar(&rmqUser, "rmq-user", "", "RabbitMQ User (Required)")
 	rootCmd.Flags().StringVar(&rmqPassword, "rmq-password", "", "RabbitMQ Password (Required)")
@@ -60,7 +59,6 @@ func main() {
 
 	// Mark flags as required and throw error if any are missing
 	// We require users to explicitly specify these parameters
-	rootCmd.MarkFlagRequired("amq-url")
 	rootCmd.MarkFlagRequired("mgmt-url")
 	rootCmd.MarkFlagRequired("rmq-user")
 	rootCmd.MarkFlagRequired("rmq-password")
@@ -70,6 +68,24 @@ func main() {
 		fmt.Println(err)
 		os.Exit(1)
 	}
+}
+
+// Log terminating error to both stdout and log file before exiting
+func fatalf(format string, v ...interface{}) {
+	msg := fmt.Sprintf(format, v...)
+	log.Print(msg)
+	fmt.Println(msg)
+	os.Exit(1)
+}
+
+// Build the AMQP connection string from the existing parameters (management URL and credentials)
+func deriveAMQPURL(mgmtURL, user, password string) (string, error) {
+	parsed, err := url.Parse(mgmtURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse management URL: %w", err)
+	}
+	host := parsed.Hostname()
+	return fmt.Sprintf("amqp://%s:%s@%s:5672/", user, password, host), nil
 }
 
 // Main benchmark execution
@@ -94,6 +110,11 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 
 	// Log to file only (to avoid interfering with progress bar)
 	log.SetOutput(f)
+
+	amqpURL, err := deriveAMQPURL(mgmtURL, rmqUser, rmqPassword)
+	if err != nil {
+		fatalf("Failed to construct AMQP URL from the given parameters: %v", err)
+	}
 
 	// Log CLI arguments
 	// Omit Management URL connection string since it contains complete credentials (namely password)
@@ -127,37 +148,56 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 
 	// Controller component contains common functionality for RabbitMQ node & Management API interactions
 	ctrl := rmq.NewController(mgmtURL, rmqUser, rmqPassword)
-	
+
 	// Create specified experiment & pass parameters
 	exp, err := experiments.GetExperiment(experimentName)
 	if err != nil {
-		log.Fatalf("Failed to select the specified experiment: %v", err)
+		fatalf("Failed to select the specified experiment: %v", err)
 	}
 
 	config := experiments.Config{
-		RabbitURL: amqpURL,
-		ManagementURL: mgmtURL,
-		User: rmqUser,
-		Password: rmqPassword,
-		QueueName: queueName,
-		QuorumSize: quorumSize,
-		MsgSize: msgSize,
-		WarmupSeconds: warmup,
+		RabbitURL:       amqpURL,
+		ManagementURL:   mgmtURL,
+		User:            rmqUser,
+		Password:        rmqPassword,
+		QueueName:       queueName,
+		QuorumSize:      quorumSize,
+		MsgSize:         msgSize,
+		WarmupSeconds:   warmup,
 		DurationSeconds: duration,
-		Publishers: publishers,
-		Consumers: consumers,
+		Publishers:      publishers,
+		Consumers:       consumers,
 	}
 	if err := exp.Setup(config, ctrl); err != nil {
-		log.Fatalf("Failed to configure the experiment: %v", err)
+		fatalf("Failed to configure the experiment: %v", err)
 	}
 	defer exp.Teardown()
 
 	// Create the Metrics Recorder & start recording
 	// TODO: Make custom Recorders defineable per experiment (to keep being extensible)
-	rec, err := metrics.NewRecorder(experimentName, warmup)
+	rec, err := metrics.NewRecorder(experimentName, quorumSize, warmup)
 	if err != nil {
-		log.Fatalf("Failed to create recorder: %v", err)
+		fatalf("Failed to create recorder: %v", err)
 	}
+
+	// Write cli parameters into config file alongside results for traceability
+	benchmarkConfig := metrics.BenchmarkConfig{
+		Experiment:      experimentName,
+		StartTime:       time.Now().Format(time.RFC3339),
+		ManagementURL:   mgmtURL,
+		User:            rmqUser,
+		QueueName:       queueName,
+		QuorumSize:      quorumSize,
+		MsgSizeBytes:    msgSize,
+		WarmupSeconds:   warmup,
+		DurationSeconds: duration,
+		Publishers:      publishers,
+		Consumers:       consumers,
+	}
+	if err := rec.WriteConfig(benchmarkConfig); err != nil {
+		log.Printf("Warning: Failed to write config file: %v", err)
+	}
+
 	rec.Start()
 	defer rec.Stop()
 
@@ -174,7 +214,7 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		<-sigChan
 		log.Println("\n[INTERRUPT] Gracefully cancelling benchmark...")
 		cancel()
-		
+
 		// Force exit if another interrupt is received
 		<-sigChan
 		log.Println("\n[INTERRUPT] Forcing exit...")
@@ -206,5 +246,6 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	formattedSummary, _ := json.MarshalIndent(summary, "", "  ")
 	fmt.Println(string(formattedSummary))
 	fmt.Println("---------------------------------------------------")
+	fmt.Printf("Results saved to: %s\n", rec.GetResultsPath())
 	fmt.Printf("Log file saved to: %s\n", logFile)
 }

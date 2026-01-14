@@ -8,7 +8,7 @@
 //
 // Publishers: Send messages synchronously, waiting for a ack before sending the next one.
 // Consumers: Consume messages immediately to prevent queue backlog from influencing latency measurements.
-// Metrics: Latency (P99, P95, Mean) 
+// Metrics: Latency (P99, P95, Mean)
 package experiments
 
 import (

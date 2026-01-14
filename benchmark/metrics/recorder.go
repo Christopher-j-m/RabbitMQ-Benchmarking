@@ -4,6 +4,7 @@ package metrics
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -19,12 +20,28 @@ type LatencyBatch struct {
 	Latencies []int64
 }
 
+// All CLI parameters corresponding to the current benchmark for traceability
+type BenchmarkConfig struct {
+	Experiment      string `json:"experiment"`
+	StartTime       string `json:"start_time"`
+	ManagementURL   string `json:"management_url"`
+	User            string `json:"user"`
+	QueueName       string `json:"queue_name"`
+	QuorumSize      int    `json:"quorum_size"`
+	MsgSizeBytes    int    `json:"msg_size_bytes"`
+	WarmupSeconds   int    `json:"warmup_seconds"`
+	DurationSeconds int    `json:"duration_seconds"`
+	Publishers      int    `json:"publishers"`
+	Consumers       int    `json:"consumers"`
+}
+
 // Central component for capturing and aggregating all performance data.
 // It uses a windowed approach to calculate metrics over short intervals and a global
 // approach to determine final statistics after the warmup period.
 // Uses channel-based batching to reduce mutex contention.
 type Recorder struct {
 	filename   string
+	configFile string        // Path to the config file saved alongside the CSV
 	warmup     time.Duration // Duration to skip before counting metrics (to reach steady state)
 	startTime  time.Time     // Time when the benchmark started running
 	windowSize time.Duration // Duration of a single measurement interval (e.g., 1 second)
@@ -55,16 +72,18 @@ type Recorder struct {
 	batchWg     sync.WaitGroup
 }
 
-func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
-	// Create results directory if it doesn't exist
-	resultsDir := "results"
+func NewRecorder(experimentName string, quorumSize int, warmupSeconds int) (*Recorder, error) {
+	// Create results directory structure: results/<experiment-name>/<quorumSize>_<timestamp>/
+	timestamp := time.Now().Format("20060102-150405")
+	resultsDir := filepath.Join("results", experimentName, fmt.Sprintf("%d_%s", quorumSize, timestamp))
+
 	if err := os.MkdirAll(resultsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create results directory: %w", err)
 	}
 
-	// Create CSV file with timestamped name
-	timestamp := time.Now().Format("20060102-150405")
-	filename := filepath.Join(resultsDir, fmt.Sprintf("results_%s_%s.csv", experimentName, timestamp))
+	// Create CSV and config files
+	filename := filepath.Join(resultsDir, "results.csv")
+	configFile := filepath.Join(resultsDir, "results.config")
 
 	f, err := os.Create(filename)
 	if err != nil {
@@ -90,6 +109,7 @@ func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
 
 	return &Recorder{
 		filename:   filename,
+		configFile: configFile,
 		warmup:     time.Duration(warmupSeconds) * time.Second,
 		windowSize: 1 * time.Second,
 		// HdrHistograms setup: min=1us, max=10min (600,000,000us), significant figures=3
@@ -237,6 +257,33 @@ type Summary struct {
 	StdDevThroughput float64 `json:"std_dev_throughput"`
 	GlobalP99Latency int64   `json:"global_p99_latency_us"`
 	TotalErrorCount  int64   `json:"total_error_count"`
+}
+
+// Save the benchmark cli params to .config file alongside the results CSV.
+// This allows tracing back what parameters were used for the corresponding results.
+func (r *Recorder) WriteConfig(config BenchmarkConfig) error {
+	f, err := os.Create(r.configFile)
+	if err != nil {
+		return fmt.Errorf("failed to create config file: %w", err)
+	}
+	defer f.Close()
+
+	encoder := json.NewEncoder(f)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(config); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	return nil
+}
+
+// Return the path to the results CSV file
+func (r *Recorder) GetResultsPath() string {
+	return r.filename
+}
+
+// Return the path to the config file
+func (r *Recorder) GetConfigPath() string {
+	return r.configFile
 }
 
 // Calculates the summary metrics from the collected data (excluding warmup).
