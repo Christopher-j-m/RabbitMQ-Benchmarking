@@ -117,6 +117,9 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	}
 	defer f.Close()
 
+	// Log from now on per default only to log file to avoid interfering with progress bar
+	log.SetOutput(f)
+
 	amqpURL, err := deriveAMQPURL(mgmtURL, rmqUser, rmqPassword)
 	if err != nil {
 		fatalf("Failed to construct AMQP URL from the given parameters: %v", err)
@@ -152,9 +155,6 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		logAndPrint("Queue Overflow: %s", queueOverflowStrategy)
 	}
 	logAndPrint("---------------------------------------------------")
-
-	// Log from now on per default only to log file to avoid interfering with progress bar
-	log.SetOutput(f)
 
 	// Controller component contains common functionality for RabbitMQ node & Management API interactions
 	ctrl := rmq.NewController(mgmtURL, rmqUser, rmqPassword)
