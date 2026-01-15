@@ -89,6 +89,16 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 			"x-quorum-initial-group-size": config.QuorumSize,
 		}
 
+		// Add max-length and overflow settings if specified
+		// This allows running throughput tests without consumers by dropping messages automatically
+		if config.QueueMaxLength > 0 {
+			args["x-max-length"] = config.QueueMaxLength
+			if config.QueueOverflowStrategy != "" {
+				args["x-overflow"] = config.QueueOverflowStrategy
+			}
+			log.Printf("Queue %s: queue-length=%d, queue-overflow=%s", qName, config.QueueMaxLength, config.QueueOverflowStrategy)
+		}
+
 		// Create the quorum queue (or modify an existing one with the same name)
 		_, err = ch.QueueDeclare(
 			qName, // queue name

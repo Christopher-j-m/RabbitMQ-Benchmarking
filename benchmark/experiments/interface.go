@@ -10,17 +10,19 @@ import (
 
 // Config type that holds configuration parameters for an experiment
 type Config struct {
-	RabbitURL       string
-	ManagementURL   string
-	User            string
-	Password        string
-	QueueName       string
-	QuorumSize      int
-	MsgSize         int
-	WarmupSeconds   int
-	DurationSeconds int
-	Publishers      int
-	Consumers       int
+	RabbitURL             string
+	ManagementURL         string
+	User                  string
+	Password              string
+	QueueName             string
+	QuorumSize            int
+	MsgSize               int
+	WarmupSeconds         int
+	DurationSeconds       int
+	Publishers            int
+	Consumers             int
+	QueueMaxLength        int
+	QueueOverflowStrategy string
 }
 
 // Interface for defining a experiment

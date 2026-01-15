@@ -32,6 +32,8 @@ var (
 	publishers     int
 	consumers      int
 	experimentName string
+	queueMaxLength int
+	queueOverflowStrategy string
 )
 
 func main() {
@@ -41,7 +43,7 @@ func main() {
 		Run:   runBenchmark,
 	}
 
-	// Define command-line flags and their default values
+	// CLI params and their default values
 	rootCmd.Flags().StringVar(&mgmtURL, "mgmt-url", "", "RabbitMQ Management URL (Required)")
 	rootCmd.Flags().StringVar(&rmqUser, "rmq-user", "", "RabbitMQ User (Required)")
 	rootCmd.Flags().StringVar(&rmqPassword, "rmq-password", "", "RabbitMQ Password (Required)")
@@ -52,6 +54,8 @@ func main() {
 	rootCmd.Flags().IntVar(&duration, "duration", 600, "Test duration in seconds")
 	rootCmd.Flags().IntVar(&publishers, "publishers", 10, "Number of concurrent publishers per node")
 	rootCmd.Flags().IntVar(&consumers, "consumers", 0, "Number of concurrent consumers per node")
+	rootCmd.Flags().IntVar(&queueMaxLength, "queue-length", 0, "Maximum queue length (0 = unlimited)")
+	rootCmd.Flags().StringVar(&queueOverflowStrategy, "queue-overflow", "drop-head", "Queue overflow behavior when queue-length > 0: 'drop-head', 'reject-publish', or 'reject-publish-dlx'")
 
 	experimentsList := experiments.ListExperiments()
 	helpText := fmt.Sprintf("Experiment to run: %v (Required)", experimentsList)
@@ -72,10 +76,15 @@ func main() {
 
 // Log terminating error to both stdout and log file before exiting
 func fatalf(format string, v ...interface{}) {
+	logAndPrint(format, v...)
+	os.Exit(1)
+}
+
+// Log a message to both the log file and stdout
+func logAndPrint(format string, v ...interface{}) {
 	msg := fmt.Sprintf(format, v...)
 	log.Print(msg)
 	fmt.Println(msg)
-	os.Exit(1)
 }
 
 // Build the AMQP connection string from the existing parameters (management URL and credentials)
@@ -108,43 +117,44 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	}
 	defer f.Close()
 
-	// Log to file only (to avoid interfering with progress bar)
-	log.SetOutput(f)
-
 	amqpURL, err := deriveAMQPURL(mgmtURL, rmqUser, rmqPassword)
 	if err != nil {
 		fatalf("Failed to construct AMQP URL from the given parameters: %v", err)
 	}
 
-	// Log CLI arguments
-	// Omit Management URL connection string since it contains complete credentials (namely password)
-	log.Println("---------------------------------------------------")
-	log.Printf("Benchmark Parameters:")
-	log.Printf("  Experiment: %s", experimentName)
-	log.Printf("  Mgmt URL: %s", mgmtURL)
-	log.Printf("  Rmq User: %s", rmqUser)
-	log.Printf("  Queue Name: %s", queueName)
-	log.Printf("  Quorum Size: %d", quorumSize)
-	log.Printf("  Msg Size (bytes): %d", msgSize)
-	log.Printf("  Warmup (seconds): %d", warmup)
-	log.Printf("  Duration (seconds): %d", duration)
-	log.Printf("  Publishers: %d", publishers)
-	log.Printf("  Consumers: %d", consumers)
-	log.Println("---------------------------------------------------")
+	// Ensure that the provided queue-overflow value is a valid strategy
+	if queueMaxLength > 0 && queueOverflowStrategy != "" {
+		validOverflows := map[string]bool{
+			"drop-head":          true,
+			"reject-publish":     true,
+			"reject-publish-dlx": true,
+		}
+		if !validOverflows[queueOverflowStrategy] {
+			fatalf("Invalid queue-overflow: %s. Valid values are: drop-head, reject-publish, reject-publish-dlx", queueOverflowStrategy)
+		}
+	}
 
-	// Only print the CLI parameters to stdout
-	// Warmup and duration are already shown in the progress bar hence they are omitted
-	// => Further output goes to the log file to avoid interfering with progress bar
-	fmt.Println("---------------------------------------------------")
-	fmt.Printf("Experiment: %s\n", experimentName)
-	fmt.Printf("Mgmt URL: %s\n", mgmtURL)
-	fmt.Printf("Rmq User: %s\n", rmqUser)
-	fmt.Printf("Queue Name: %s\n", queueName)
-	fmt.Printf("Quorum Size: %d\n", quorumSize)
-	fmt.Printf("Msg Size (bytes): %d\n", msgSize)
-	fmt.Printf("Publishers: %d\n", publishers)
-	fmt.Printf("Consumers: %d\n", consumers)
-	fmt.Println("---------------------------------------------------")
+	// Log CLI params to both stdout and log file
+	logAndPrint("---------------------------------------------------")
+	logAndPrint("Benchmark Parameters:")
+	logAndPrint("Experiment: %s", experimentName)
+	logAndPrint("Mgmt URL: %s", mgmtURL)
+	logAndPrint("Rmq User: %s", rmqUser)
+	logAndPrint("Queue Name: %s", queueName)
+	logAndPrint("Quorum Size: %d", quorumSize)
+	logAndPrint("Msg Size (bytes): %d", msgSize)
+	logAndPrint("Warmup (seconds): %d", warmup)
+	logAndPrint("Duration (seconds): %d", duration)
+	logAndPrint("Publishers: %d", publishers)
+	logAndPrint("Consumers: %d", consumers)
+	if queueMaxLength > 0 {
+		logAndPrint("Queue Length: %d", queueMaxLength)
+		logAndPrint("Queue Overflow: %s", queueOverflowStrategy)
+	}
+	logAndPrint("---------------------------------------------------")
+
+	// Log from now on per default only to log file to avoid interfering with progress bar
+	log.SetOutput(f)
 
 	// Controller component contains common functionality for RabbitMQ node & Management API interactions
 	ctrl := rmq.NewController(mgmtURL, rmqUser, rmqPassword)
@@ -167,6 +177,8 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		DurationSeconds: duration,
 		Publishers:      publishers,
 		Consumers:       consumers,
+		QueueMaxLength:  queueMaxLength,
+		QueueOverflowStrategy: queueOverflowStrategy,
 	}
 	if err := exp.Setup(config, ctrl); err != nil {
 		fatalf("Failed to configure the experiment: %v", err)
@@ -193,9 +205,11 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		DurationSeconds: duration,
 		Publishers:      publishers,
 		Consumers:       consumers,
+		QueueMaxLength:  queueMaxLength,
+		QueueOverflowStrategy: queueOverflowStrategy,
 	}
 	if err := rec.WriteConfig(benchmarkConfig); err != nil {
-		log.Printf("Warning: Failed to write config file: %v", err)
+		log.Printf("Failed to write config file: %v", err)
 	}
 
 	rec.Start()
@@ -238,14 +252,13 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	fmt.Println("---------------------------------------------------")
 
 	if err != nil {
-		log.Printf("Experiment failed: %v", err)
-		fmt.Printf("Experiment failed: %v\n", err)
+		logAndPrint("Experiment failed: %v", err)
 	}
 
 	// Print Summary
 	formattedSummary, _ := json.MarshalIndent(summary, "", "  ")
 	fmt.Println(string(formattedSummary))
-	fmt.Println("---------------------------------------------------")
-	fmt.Printf("Results saved to: %s\n", rec.GetResultsPath())
-	fmt.Printf("Log file saved to: %s\n", logFile)
+	logAndPrint("---------------------------------------------------")
+	logAndPrint("Results saved to: %s", rec.GetResultsPath())
+	logAndPrint("Log file saved to: %s", logFile)
 }

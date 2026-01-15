@@ -22,17 +22,19 @@ type LatencyBatch struct {
 
 // All CLI parameters corresponding to the current benchmark for traceability
 type BenchmarkConfig struct {
-	Experiment      string `json:"experiment"`
-	StartTime       string `json:"start_time"`
-	ManagementURL   string `json:"management_url"`
-	User            string `json:"user"`
-	QueueName       string `json:"queue_name"`
-	QuorumSize      int    `json:"quorum_size"`
-	MsgSizeBytes    int    `json:"msg_size_bytes"`
-	WarmupSeconds   int    `json:"warmup_seconds"`
-	DurationSeconds int    `json:"duration_seconds"`
-	Publishers      int    `json:"publishers"`
-	Consumers       int    `json:"consumers"`
+	Experiment            string `json:"experiment"`
+	StartTime             string `json:"start_time"`
+	ManagementURL         string `json:"management_url"`
+	User                  string `json:"user"`
+	QueueName             string `json:"queue_name"`
+	QuorumSize            int    `json:"quorum_size"`
+	MsgSizeBytes          int    `json:"msg_size_bytes"`
+	WarmupSeconds         int    `json:"warmup_seconds"`
+	DurationSeconds       int    `json:"duration_seconds"`
+	Publishers            int    `json:"publishers"`
+	Consumers             int    `json:"consumers"`
+	QueueMaxLength        int    `json:"queue_length,omitempty"`
+	QueueOverflowStrategy string `json:"queue_overflow,omitempty"`
 }
 
 // Central component for capturing and aggregating all performance data.
