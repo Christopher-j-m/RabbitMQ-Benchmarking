@@ -11,11 +11,71 @@ packages:
   - jq
   - iotop
   - ifstat
+  - xfsprogs
 
 runcmd:
+  # Mount Premium SSD v2 data disk at /var/lib/rabbitmq before RabbitMQ starts
+  - |
+    echo "[$(date)] Setting up Premium SSD v2 data disk for RabbitMQ..."
+    
+    # Wait for the data disk at LUN 10 to appear
+    DISK_PATH="/dev/disk/azure/scsi1/lun10"
+    for i in {1..60}; do
+      if [ -e "$DISK_PATH" ]; then
+        echo "[$(date)] Data disk found at $DISK_PATH"
+        break
+      fi
+      if [ $i -eq 60 ]; then
+        echo "[$(date)] ERROR: Data disk not found at $DISK_PATH after 60 seconds"
+        exit 1
+      fi
+      echo "[$(date)] Waiting for data disk... ($i/60)"
+      sleep 1
+    done
+    
+    # Get the actual device path
+    DEVICE=$(readlink -f "$DISK_PATH")
+    echo "[$(date)] Data disk device: $DEVICE"
+    
+    # Check if disk is already formatted
+    if ! blkid "$DEVICE" | grep -q xfs; then
+      echo "[$(date)] Formatting $DEVICE with XFS..."
+      mkfs.xfs "$DEVICE"
+    else
+      echo "[$(date)] Disk already formatted with XFS"
+    fi
+    
+    # Create the RabbitMQ data directory
+    mkdir -p /var/lib/rabbitmq
+    
+    # Get the UUID for fstab entry
+    UUID=$(blkid -s UUID -o value "$DEVICE")
+    echo "[$(date)] Disk UUID: $UUID"
+    
+    # Add fstab entry if not already present
+    # We need to use 'nofail' to avoid boot issues if anything goes wrong with the V2 SSD disk
+    if ! grep -q "$UUID" /etc/fstab; then
+      echo "UUID=$UUID /var/lib/rabbitmq xfs defaults,nofail 0 2" >> /etc/fstab
+      echo "[$(date)] Added fstab entry for data disk"
+    fi
+    
+    # Mount the disk
+    mount /var/lib/rabbitmq
+    echo "[$(date)] Data disk mounted at /var/lib/rabbitmq"
+    
+    # Set ownership for rabbitmq user
+    chown -R rabbitmq:rabbitmq /var/lib/rabbitmq 2>/dev/null || true
+    chmod 750 /var/lib/rabbitmq
+
   # Set the shared Erlang cookie & Nodename env var
+  # Note: /var/lib/rabbitmq is now on the Premium SSD v2 data disk
   - |
     HOSTNAME=$(hostname -s)
+    
+    # Ensure rabbitmq owns the data directory
+    chown -R rabbitmq:rabbitmq /var/lib/rabbitmq
+    chmod 750 /var/lib/rabbitmq
+    
     echo "${erlang_cookie}" > /var/lib/rabbitmq/.erlang.cookie
     chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie
     chmod 400 /var/lib/rabbitmq/.erlang.cookie

@@ -205,6 +205,7 @@ resource "azurerm_linux_virtual_machine" "cluster_vm" {
   resource_group_name   = azurerm_resource_group.rg.name
   location              = azurerm_resource_group.rg.location
   size                  = var.cluster_nodes.size
+  zone                  = var.cluster_nodes.zone
   admin_username        = var.cluster_nodes.admin_username
   custom_data           = base64encode(data.template_file.cluster_init.rendered)
   network_interface_ids = [azurerm_network_interface.cluster_nic[count.index].id]
@@ -226,6 +227,27 @@ resource "azurerm_linux_virtual_machine" "cluster_vm" {
     sku       = var.cluster_nodes.source_image.sku
     version   = var.cluster_nodes.source_image.version
   }
+}
+
+resource "azurerm_managed_disk" "cluster_data_disk" {
+  count                = var.cluster_nodes.count
+  name                 = format("%s-datadisk-%02d", var.cluster_nodes.name_prefix, count.index + 1)
+  location             = azurerm_resource_group.rg.location
+  resource_group_name  = azurerm_resource_group.rg.name
+  storage_account_type = "PremiumV2_LRS"
+  create_option        = "Empty"
+  disk_size_gb         = var.cluster_nodes.data_disk.size_gb
+  disk_iops_read_write = var.cluster_nodes.data_disk.iops_read_write
+  disk_mbps_read_write = var.cluster_nodes.data_disk.mbps_read_write
+  zone                 = var.cluster_nodes.zone
+}
+
+resource "azurerm_virtual_machine_data_disk_attachment" "cluster_data_disk_attach" {
+  count              = var.cluster_nodes.count
+  managed_disk_id    = azurerm_managed_disk.cluster_data_disk[count.index].id
+  virtual_machine_id = azurerm_linux_virtual_machine.cluster_vm[count.index].id
+  lun                = 10
+  caching            = "None"
 }
 
 # Load Generator VMs

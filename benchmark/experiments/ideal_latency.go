@@ -27,10 +27,11 @@ import (
 )
 
 type IdealLatency struct {
-	config   Config
-	ctrl     *rmq.Controller
-	conn     *amqp.Connection
-	payloads [][]byte
+	config    Config
+	ctrl      *rmq.Controller
+	leaderURL string
+	conns     []*amqp.Connection
+	payloads  [][]byte
 }
 
 func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
@@ -55,13 +56,25 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
-	// Connect to cluster to declare queue
+	// Connect to cluster
 	conn, err := ctrl.Connect(config.RabbitURL)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
 
+	// Delete existing queues with the same name as the ones
+	// that will be created during this experiment
+	chDelete, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("failed to open channel for deletion: %w", err)
+	}
+
+	log.Printf("Deleting existing queue %s...", config.QueueName)
+	_, _ = chDelete.QueueDelete(config.QueueName, false, false, false)
+	chDelete.Close()
+
+	// Create a channel for queue declaration
 	ch, err := conn.Channel()
 	if err != nil {
 		return err
@@ -74,7 +87,7 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 		"x-quorum-initial-group-size": config.QuorumSize,
 	}
 
-	// Create the quorum queue (or modify an existing one with the same name)
+	// Create the quorum queue
 	_, err = ch.QueueDeclare(
 		config.QueueName, // name
 		true,             // durable
@@ -94,37 +107,47 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 	log.Printf("Queue leader is on node: %s", leaderNode)
 
-	// Connect directly to the leader node
-	leaderURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), leaderNode)
-	e.conn, err = ctrl.Connect(leaderURL)
-	if err != nil {
-		return fmt.Errorf("failed to connect to leader node %s: %w", leaderNode, err)
-	}
+	// Store leader URL for publisher/consumer connections
+	e.leaderURL = fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), leaderNode)
+	e.conns = make([]*amqp.Connection, 0)
 
 	return nil
 }
 
 func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
+	var connMu sync.Mutex
 
-	// Listen for amqp.Blocking alarms on the connection with the leader node.
-	// These alarms (memory/disk pressure) are logged to detect conditions that
-	// invalidate the measurements
-	// => https://www.rabbitmq.com/docs/connection-blocked
-	blockings := e.conn.NotifyBlocked(make(chan amqp.Blocking))
-
-	go func() {
-		var blockStart time.Time
-		for b := range blockings {
-			if b.Active {
-				blockStart = time.Now()
-				log.Printf("[BLOCKED] Reason: %q", b.Reason)
-			} else {
-				duration := time.Since(blockStart)
-				log.Printf("[UNBLOCKED] Duration: %v", duration)
-			}
+	// Helper to create and track a new connection
+	createConnection := func() (*amqp.Connection, error) {
+		conn, err := e.ctrl.Connect(e.leaderURL)
+		if err != nil {
+			return nil, err
 		}
-	}()
+		connMu.Lock()
+		e.conns = append(e.conns, conn)
+		connMu.Unlock()
+
+		// Listen for amqp.Blocking alarms on the connection with the leader node.
+		// These alarms (memory/disk pressure) are logged to detect conditions that
+		// invalidate the measurements
+		// => https://www.rabbitmq.com/docs/connection-blocked
+		blockings := conn.NotifyBlocked(make(chan amqp.Blocking))
+		go func(c <-chan amqp.Blocking) {
+			var blockStart time.Time
+			for b := range c {
+				if b.Active {
+					blockStart = time.Now()
+					log.Printf("[BLOCKED] Reason: %q", b.Reason)
+				} else {
+					duration := time.Since(blockStart)
+					log.Printf("[UNBLOCKED] Duration: %v", duration)
+				}
+			}
+		}(blockings)
+
+		return conn, nil
+	}
 
 	// CONSUMERS
 	// Consumers are started to drain the queue immediately and record end-to-end latency.
@@ -136,7 +159,13 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 			go func(rec *metrics.Recorder) {
 				defer wg.Done()
 
-				ch, err := e.conn.Channel()
+				conn, err := createConnection()
+				if err != nil {
+					log.Printf("Consumer failed to create connection: %v", err)
+					return
+				}
+
+				ch, err := conn.Channel()
 				if err != nil {
 					log.Printf("Consumer failed to create channel: %v", err)
 					return
@@ -215,11 +244,17 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 		go func(publisherID int) {
 			defer wg.Done()
 
+			conn, err := createConnection()
+			if err != nil {
+				log.Printf("Publisher failed to create connection: %v", err)
+				return
+			}
+
 			// Local RNG to avoid global mutex contention
 			// => https://go.dev/blog/randv2
 			rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
 
-			ch, err := e.conn.Channel()
+			ch, err := conn.Channel()
 			if err != nil {
 				log.Printf("Publisher failed to create channel: %v", err)
 				return
@@ -302,8 +337,10 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 }
 
 func (e *IdealLatency) Teardown() error {
-	if e.conn != nil {
-		return e.conn.Close()
+	for _, conn := range e.conns {
+		if conn != nil {
+			conn.Close()
+		}
 	}
 	return nil
 }

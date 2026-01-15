@@ -26,6 +26,8 @@ import (
 type LinearCapacity struct {
 	config   Config
 	ctrl     *rmq.Controller
+	nodes    []string
+	connURLs []string
 	conns    []*amqp.Connection
 	queues   []string
 	payloads [][]byte
@@ -60,28 +62,46 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 	log.Printf("Discovered nodes: %v", nodes)
 
-	e.conns = make([]*amqp.Connection, len(nodes))
+	e.nodes = nodes
+	e.connURLs = make([]string, len(nodes))
 	e.queues = make([]string, len(nodes))
+	e.conns = make([]*amqp.Connection, 0)
 
 	// Connect to each discovered node and create a new quorum queue
 	for i, node := range nodes {
-		// Connect to each node
+		// Build the connection string for the curr node
 		connURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), node)
-		conn, err := ctrl.Connect(connURL)
-		if err != nil {
-			return fmt.Errorf("failed to connect to node %s: %w", node, err)
-		}
-		e.conns[i] = conn
-
-		ch, err := conn.Channel()
-		if err != nil {
-			return err
-		}
+		e.connURLs[i] = connURL
 
 		// Set the queue name based on the given base name and node index
 		// e.g. queue "test-queue" becomes "test-queue-0", "test-queue-1", ... on each node
 		qName := fmt.Sprintf("%s-%d", config.QueueName, i)
 		e.queues[i] = qName
+
+		// Connect to create the queue
+		conn, err := ctrl.Connect(connURL)
+		if err != nil {
+			return fmt.Errorf("failed to connect to node %s: %w", node, err)
+		}
+
+		// Delete existing queues with the same name as the ones
+		// that will be created during this experiment
+		chDelete, err := conn.Channel()
+		if err != nil {
+			conn.Close()
+			return fmt.Errorf("failed to create delete channel: %w", err)
+		}
+
+		log.Printf("Deleting existing queue %s...", qName)
+		_, _ = chDelete.QueueDelete(qName, false, false, false)
+		chDelete.Close()
+
+		// Create a channel for queue declaration
+		ch, err := conn.Channel()
+		if err != nil {
+			conn.Close()
+			return err
+		}
 
 		// Configure the queue as a quorum queue with the replication group size.
 		args := amqp.Table{
@@ -91,6 +111,7 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 
 		// Add max-length and overflow settings if specified
 		// This allows running throughput tests without consumers by dropping messages automatically
+		// => This observably reduced the cpu usage on the cluster nodes, which in turn allows higher throughput in many cases
 		if config.QueueMaxLength > 0 {
 			args["x-max-length"] = config.QueueMaxLength
 			if config.QueueOverflowStrategy != "" {
@@ -99,7 +120,7 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 			log.Printf("Queue %s: queue-length=%d, queue-overflow=%s", qName, config.QueueMaxLength, config.QueueOverflowStrategy)
 		}
 
-		// Create the quorum queue (or modify an existing one with the same name)
+		// Create the quorum queue
 		_, err = ch.QueueDeclare(
 			qName, // queue name
 			true,  // durable - survives broker restarts
@@ -110,6 +131,7 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 		)
 
 		ch.Close()
+		conn.Close()
 		if err != nil {
 			return err
 		}
@@ -120,17 +142,24 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 
 func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
+	var connMu sync.Mutex
 
-	// Start a routine for each connection to listen for amqp.Blocking alarms.
-	// These alarms (memory/disk pressure) are logged to detect conditions that
-	// invalidate the measurements
-	// => https://www.rabbitmq.com/docs/connection-blocked
-	for i, conn := range e.conns {
-		currentConn := conn
-		nodeName := fmt.Sprintf("Node-%d", i)
+	// Helper to create and track a new connection
+	createConnection := func(nodeIdx int) (*amqp.Connection, error) {
+		conn, err := e.ctrl.Connect(e.connURLs[nodeIdx])
+		if err != nil {
+			return nil, err
+		}
+		connMu.Lock()
+		e.conns = append(e.conns, conn)
+		connMu.Unlock()
 
-		blockings := currentConn.NotifyBlocked(make(chan amqp.Blocking))
-
+		// Listen for amqp.Blocking alarms on the connection with the leader node.
+		// These alarms (memory/disk pressure) are logged to detect conditions that
+		// invalidate the measurements
+		// => https://www.rabbitmq.com/docs/connection-blocked
+		nodeName := fmt.Sprintf("Node-%d-Conn-%d", nodeIdx, len(e.conns))
+		blockings := conn.NotifyBlocked(make(chan amqp.Blocking))
 		go func(name string, c <-chan amqp.Blocking) {
 			var blockStart time.Time
 			for b := range c {
@@ -143,21 +172,31 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 				}
 			}
 		}(nodeName, blockings)
+
+		return conn, nil
 	}
 
 	// Start the specified number of consumers on each queue
 	if e.config.Consumers > 0 {
 		consumersPerQueue := e.config.Consumers
+		totalConsumers := e.config.Consumers * len(e.queues)
 
-		log.Printf("Starting %d consumers per queue (Total: %d)...", consumersPerQueue, e.config.Consumers*len(e.queues))
+		log.Printf("Starting %d consumers per queue (Total: %d)...", consumersPerQueue, totalConsumers)
 
-		for i, conn := range e.conns {
+		for i := range e.nodes {
 			queueName := e.queues[i]
+			nodeIdx := i
 
 			for c := 0; c < consumersPerQueue; c++ {
 				wg.Add(1)
-				go func(conn *amqp.Connection, q string) {
+				go func(nodeIdx int, q string) {
 					defer wg.Done()
+
+					conn, err := createConnection(nodeIdx)
+					if err != nil {
+						log.Printf("Consumer failed to create connection: %v", err)
+						return
+					}
 
 					ch, err := conn.Channel()
 					if err != nil {
@@ -202,32 +241,41 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 							d.Ack(false)
 						}
 					}
-				}(conn, queueName)
+				}(nodeIdx, queueName)
 			}
 		}
 	}
 
 	// Start the specified number of publishers on each node
 	publishersPerNode := publishers
+	totalPublishers := publishers * len(e.nodes)
 
-	log.Printf("Starting %d publishers per node (Total: %d)...", publishersPerNode, publishers*len(e.conns))
+	log.Printf("Starting %d publishers per node (Total: %d)...", publishersPerNode, totalPublishers)
 
 	publisherCounter := 0
-	for i, conn := range e.conns {
+	for i := range e.nodes {
 		queueName := e.queues[i]
+		nodeIdx := i
 
 		for w := 0; w < publishersPerNode; w++ {
 			publisherID := publisherCounter
 			publisherCounter++
 			wg.Add(1)
-			go func(c *amqp.Connection, q string, pid int) {
+			go func(nodeIdx int, q string, pid int) {
 				defer wg.Done()
+
+				// Create dedicated connection for this publisher
+				conn, err := createConnection(nodeIdx)
+				if err != nil {
+					log.Printf("Publisher failed to create connection: %v", err)
+					return
+				}
 
 				// Avoid global mutex contention on rand by using own RNG per publisher
 				// => https://go.dev/blog/randv2
 				rng := rand.New(rand.NewPCG(uint64(pid), uint64(time.Now().UnixNano())))
 
-				ch, err := c.Channel()
+				ch, err := conn.Channel()
 				if err != nil {
 					log.Printf("Publisher failed to create channel: %v", err)
 					return
@@ -296,7 +344,7 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 						}
 					}
 				}
-			}(conn, queueName, publisherID)
+			}(nodeIdx, queueName, publisherID)
 		}
 	}
 

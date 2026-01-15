@@ -140,3 +140,56 @@ func (c *Controller) Connect(url string) (*amqp.Connection, error) {
 	}
 	return amqp.DialConfig(url, config)
 }
+
+// DeleteQueue deletes a queue via the Management API.
+// This is useful when queue arguments need to change between runs.
+func (c *Controller) DeleteQueue(vhost, queueName string) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	encodedVhost := vhost
+	if vhost == "/" {
+		encodedVhost = "%2f"
+	}
+
+	url := fmt.Sprintf("%s/api/queues/%s/%s", c.ManagementURL, encodedVhost, queueName)
+
+	req, err := http.NewRequest("DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	req.SetBasicAuth(c.User, c.Password)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	// 204 No Content = success, 404 = queue doesn't exist (also fine)
+	if resp.StatusCode != 204 && resp.StatusCode != 404 {
+		return fmt.Errorf("failed to delete queue: status %d", resp.StatusCode)
+	}
+
+	// For quorum queues, we need to wait until the deletion has propagated across all nodes.
+	// Poll the queue status until it returns 404 (not found) or timeout after 10 seconds.
+	if resp.StatusCode == 204 {
+		checkURL := fmt.Sprintf("%s/api/queues/%s/%s", c.ManagementURL, encodedVhost, queueName)
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(200 * time.Millisecond)
+			checkReq, _ := http.NewRequest("GET", checkURL, nil)
+			checkReq.SetBasicAuth(c.User, c.Password)
+			checkResp, err := client.Do(checkReq)
+			if err != nil {
+				continue
+			}
+			checkResp.Body.Close()
+			if checkResp.StatusCode == 404 {
+				// Queue is confirmed deleted
+				return nil
+			}
+		}
+		return fmt.Errorf("queue deletion timed out - queue still exists after 10s")
+	}
+
+	return nil
+}

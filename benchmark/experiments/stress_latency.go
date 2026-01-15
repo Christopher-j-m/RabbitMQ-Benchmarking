@@ -31,10 +31,11 @@ import (
 type StressLatency struct {
 	config          Config
 	ctrl            *rmq.Controller
-	leaderConn      *amqp.Connection   // Connection to leader for latency measurement
+	leaderURL       string             // Connection URL for the leader node
 	leaderNodeIndex int                // Index of the leader node in the nodes list
-	stressConns     []*amqp.Connection // Connections to all nodes for stress generation
+	stressConnURLs  []string           // Connection URLs for stress generation (one per node)
 	stressQueues    []string           // Queues for stress traffic (one per node)
+	conns           []*amqp.Connection // All worker connections (closed on teardown)
 	payloads        [][]byte
 }
 
@@ -66,6 +67,16 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 		return err
 	}
 	defer conn.Close()
+
+	// Delete existing main queue to avoid PRECONDITION_FAILED when arguments change
+	chDelete, err := conn.Channel()
+	if err != nil {
+		return fmt.Errorf("failed to open channel for deletion: %w", err)
+	}
+
+	log.Printf("Deleting existing queue %s (if any)...", config.QueueName)
+	_, _ = chDelete.QueueDelete(config.QueueName, false, false, false)
+	chDelete.Close()
 
 	ch, err := conn.Channel()
 	if err != nil {
@@ -99,12 +110,8 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 	log.Printf("Queue leader is on node: %s", leaderNode)
 
-	// Connect directly to the leader node for latency measurement
-	leaderURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), leaderNode)
-	e.leaderConn, err = ctrl.Connect(leaderURL)
-	if err != nil {
-		return fmt.Errorf("failed to connect to leader node %s: %w", leaderNode, err)
-	}
+	// Store leader URL for worker connections
+	e.leaderURL = fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), leaderNode)
 
 	// Discover all cluster nodes for stress generation
 	nodes, err := ctrl.GetNodes()
@@ -125,25 +132,40 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 		return fmt.Errorf("leader node %s not found in cluster nodes list", leaderNode)
 	}
 
-	e.stressConns = make([]*amqp.Connection, len(nodes))
+	e.stressConnURLs = make([]string, len(nodes))
 	e.stressQueues = make([]string, len(nodes))
+	e.conns = make([]*amqp.Connection, 0)
 
-	// Connect to each node and create separate stress queues
+	// Build connection URLs and create stress queues on each node
 	for i, node := range nodes {
 		connURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), node)
+		e.stressConnURLs[i] = connURL
+
+		// Connect to create the stress queue
 		stressConn, err := ctrl.Connect(connURL)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", node, err)
 		}
-		e.stressConns[i] = stressConn
+
+		// Delete existing stress queue to avoid PRECONDITION_FAILED
+		chDelete, err := stressConn.Channel()
+		if err != nil {
+			stressConn.Close()
+			return fmt.Errorf("failed to open channel for deletion: %w", err)
+		}
+
+		qName := fmt.Sprintf("%s-stress-%d", config.QueueName, i)
+		log.Printf("Deleting existing stress queue %s (if any)...", qName)
+		_, _ = chDelete.QueueDelete(qName, false, false, false)
+		chDelete.Close()
 
 		stressCh, err := stressConn.Channel()
 		if err != nil {
+			stressConn.Close()
 			return err
 		}
 
 		// Create stress queues with naming convention: <base-queue>-stress-<index>
-		qName := fmt.Sprintf("%s-stress-%d", config.QueueName, i)
 		e.stressQueues[i] = qName
 
 		_, err = stressCh.QueueDeclare(
@@ -155,6 +177,7 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 			args,  // same quorum args
 		)
 		stressCh.Close()
+		stressConn.Close()
 		if err != nil {
 			return err
 		}
@@ -166,6 +189,30 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 
 func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
+	var connMu sync.Mutex // Protects e.conns slice
+
+	// Helper to create and track a new connection
+	createLeaderConnection := func() (*amqp.Connection, error) {
+		conn, err := e.ctrl.Connect(e.leaderURL)
+		if err != nil {
+			return nil, err
+		}
+		connMu.Lock()
+		e.conns = append(e.conns, conn)
+		connMu.Unlock()
+		return conn, nil
+	}
+
+	createStressConnection := func(nodeIdx int) (*amqp.Connection, error) {
+		conn, err := e.ctrl.Connect(e.stressConnURLs[nodeIdx])
+		if err != nil {
+			return nil, err
+		}
+		connMu.Lock()
+		e.conns = append(e.conns, conn)
+		connMu.Unlock()
+		return conn, nil
+	}
 
 	// PUBLISHERS
 	// Leader Node:
@@ -176,43 +223,9 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 	const latencyPublishers = 1
 	stressPublishersPerNode := publishers
 
-	log.Printf("Publisher Distribution:")
+	log.Printf("Publisher Distribution (one connection per worker):")
 	log.Printf("  - Leader Node: %d Latency + %d Stress Publishers", latencyPublishers, stressPublishersPerNode)
 	log.Printf("  - Other Nodes: %d Stress Publishers", stressPublishersPerNode)
-
-	// Listen for blocking alarms on the leader connection
-	blockings := e.leaderConn.NotifyBlocked(make(chan amqp.Blocking))
-	go func() {
-		var blockStart time.Time
-		for b := range blockings {
-			if b.Active {
-				blockStart = time.Now()
-				log.Printf("[BLOCKED] Leader - Reason: %q", b.Reason)
-			} else {
-				duration := time.Since(blockStart)
-				log.Printf("[UNBLOCKED] Leader - Duration: %v", duration)
-			}
-		}
-	}()
-
-	// Listen for blocking alarms on all stress connections
-	for i, conn := range e.stressConns {
-		currentConn := conn
-		nodeName := fmt.Sprintf("StressNode-%d", i)
-		stressBlockings := currentConn.NotifyBlocked(make(chan amqp.Blocking))
-		go func(name string, c <-chan amqp.Blocking) {
-			var blockStart time.Time
-			for b := range c {
-				if b.Active {
-					blockStart = time.Now()
-					log.Printf("[BLOCKED] %s - Reason: %q", name, b.Reason)
-				} else {
-					duration := time.Since(blockStart)
-					log.Printf("[UNBLOCKED] %s - Duration: %v", name, duration)
-				}
-			}
-		}(nodeName, stressBlockings)
-	}
 
 	// CONSUMERS
 	// Leader Node:
@@ -224,45 +237,79 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 		const latencyConsumers = 1
 		stressConsumersPerNode := e.config.Consumers
 
-		log.Printf("Consumer Distribution:")
+		log.Printf("Consumer Distribution (one connection per worker):")
 		log.Printf("  - Leader Node: %d Latency + %d Stress Consumers", latencyConsumers, stressConsumersPerNode)
 		log.Printf("  - Other Nodes: %d Stress Consumers", stressConsumersPerNode)
 
-		// Start Latency Consumer (Leader only)
+		// Start Latency Consumer (Leader only, one connection)
 		wg.Add(1)
-		go e.runConsumer(ctx, &wg, e.leaderConn, e.config.QueueName, rec)
+		go func() {
+			defer wg.Done()
+			conn, err := createLeaderConnection()
+			if err != nil {
+				log.Printf("Latency consumer failed to create connection: %v", err)
+				return
+			}
+			e.runConsumerWithConn(ctx, conn, e.config.QueueName, rec)
+		}()
 
-		// Start Stress Consumers on all nodes
-		for i, conn := range e.stressConns {
+		// Start Stress Consumers on all nodes (one connection each)
+		for i := range e.stressConnURLs {
 			queueName := e.stressQueues[i]
+			nodeIdx := i
 
 			for c := 0; c < stressConsumersPerNode; c++ {
 				wg.Add(1)
-				go e.runConsumer(ctx, &wg, conn, queueName, nil)
+				go func(nodeIdx int, q string) {
+					defer wg.Done()
+					conn, err := createStressConnection(nodeIdx)
+					if err != nil {
+						log.Printf("Stress consumer failed to create connection: %v", err)
+						return
+					}
+					e.runConsumerWithConn(ctx, conn, q, nil)
+				}(nodeIdx, queueName)
 			}
 		}
 	} else {
 		log.Println("WARNING: Consumers set to < 0, so no consumers will be started...")
 	}
 
-	// Start Stress Publishers
+	// Start Stress Publishers (one connection each)
 	stressCounter := 0
-	for i, conn := range e.stressConns {
+	for i := range e.stressConnURLs {
 		queueName := e.stressQueues[i]
+		nodeIdx := i
 
 		for w := 0; w < stressPublishersPerNode; w++ {
 			publisherID := stressCounter
 			stressCounter++
 			wg.Add(1)
-			go e.runStressPublisher(ctx, &wg, conn, queueName, publisherID)
+			go func(nodeIdx int, q string, pid int) {
+				defer wg.Done()
+				conn, err := createStressConnection(nodeIdx)
+				if err != nil {
+					log.Printf("Stress publisher failed to create connection: %v", err)
+					return
+				}
+				e.runStressPublisherWithConn(ctx, conn, q, pid)
+			}(nodeIdx, queueName, publisherID)
 		}
 	}
 
-	// Start Latency Publishers
-	log.Printf("Starting %d latency publisher...", latencyPublishers)
+	// Start Latency Publishers (one connection each)
+	log.Printf("Starting %d latency publisher (one connection each)...", latencyPublishers)
 	for i := 0; i < latencyPublishers; i++ {
 		wg.Add(1)
-		go e.runLatencyPublisher(ctx, &wg, i, rec)
+		go func(publisherID int) {
+			defer wg.Done()
+			conn, err := createLeaderConnection()
+			if err != nil {
+				log.Printf("Latency publisher failed to create connection: %v", err)
+				return
+			}
+			e.runLatencyPublisherWithConn(ctx, conn, publisherID, rec)
+		}(i)
 	}
 
 	// Wait for the go context to be canceled and all coroutines to exit gracefully
@@ -270,11 +317,9 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 	return rec.GetSummary(), nil
 }
 
-// Drain messages from a queue
+// Drain messages from a queue (connection provided by caller)
 // If rec is not nil (latency consumer), it extracts the timestamp from headers and records latency
-func (e *StressLatency) runConsumer(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connection, queueName string, rec *metrics.Recorder) {
-	defer wg.Done()
-
+func (e *StressLatency) runConsumerWithConn(ctx context.Context, conn *amqp.Connection, queueName string, rec *metrics.Recorder) {
 	ch, err := conn.Channel()
 	if err != nil {
 		log.Printf("Consumer failed to create channel: %v", err)
@@ -344,10 +389,8 @@ func (e *StressLatency) runConsumer(ctx context.Context, wg *sync.WaitGroup, con
 	}
 }
 
-// Fire messages as fast as possible without waiting for confirms
-func (e *StressLatency) runStressPublisher(ctx context.Context, wg *sync.WaitGroup, conn *amqp.Connection, queueName string, publisherID int) {
-	defer wg.Done()
-
+// Fire messages as fast as possible without waiting for confirms (connection provided by caller)
+func (e *StressLatency) runStressPublisherWithConn(ctx context.Context, conn *amqp.Connection, queueName string, publisherID int) {
 	rng := rand.New(rand.NewPCG(uint64(publisherID+1000), uint64(time.Now().UnixNano())))
 
 	ch, err := conn.Channel()
@@ -400,13 +443,11 @@ func (e *StressLatency) runStressPublisher(ctx context.Context, wg *sync.WaitGro
 	}
 }
 
-// Send messages synchronously, waiting for ACK & with timestamp header
-func (e *StressLatency) runLatencyPublisher(ctx context.Context, wg *sync.WaitGroup, publisherID int, rec *metrics.Recorder) {
-	defer wg.Done()
-
+// Send messages synchronously, waiting for ACK & with timestamp header (connection provided by caller)
+func (e *StressLatency) runLatencyPublisherWithConn(ctx context.Context, conn *amqp.Connection, publisherID int, rec *metrics.Recorder) {
 	rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
 
-	ch, err := e.leaderConn.Channel()
+	ch, err := conn.Channel()
 	if err != nil {
 		log.Printf("Latency publisher failed to create channel: %v", err)
 		return
@@ -466,21 +507,10 @@ func (e *StressLatency) runLatencyPublisher(ctx context.Context, wg *sync.WaitGr
 }
 
 func (e *StressLatency) Teardown() error {
-	var lastErr error
-
-	if e.leaderConn != nil {
-		if err := e.leaderConn.Close(); err != nil {
-			lastErr = err
-		}
-	}
-
-	for _, conn := range e.stressConns {
+	for _, conn := range e.conns {
 		if conn != nil {
-			if err := conn.Close(); err != nil {
-				lastErr = err
-			}
+			conn.Close()
 		}
 	}
-
-	return lastErr
+	return nil
 }
