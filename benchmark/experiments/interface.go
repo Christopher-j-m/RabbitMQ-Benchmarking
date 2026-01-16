@@ -23,6 +23,7 @@ type Config struct {
 	Consumers             int
 	QueueMaxLength        int
 	QueueOverflowStrategy string
+	QueueCount            int
 }
 
 // Interface for defining a experiment

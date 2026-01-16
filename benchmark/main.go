@@ -21,19 +21,20 @@ import (
 
 // Command-line parameters
 var (
-	mgmtURL        string
-	rmqUser        string
-	rmqPassword    string
-	queueName      string
-	quorumSize     int
-	msgSize        int
-	warmup         int
-	duration       int
-	publishers     int
-	consumers      int
-	experimentName string
-	queueMaxLength int
+	mgmtURL               string
+	rmqUser               string
+	rmqPassword           string
+	queueName             string
+	quorumSize            int
+	msgSize               int
+	warmup                int
+	duration              int
+	publishers            int
+	consumers             int
+	experimentName        string
+	queueMaxLength        int
 	queueOverflowStrategy string
+	queueCount            int
 )
 
 func main() {
@@ -56,6 +57,7 @@ func main() {
 	rootCmd.Flags().IntVar(&consumers, "consumers", 0, "Number of concurrent consumers per node")
 	rootCmd.Flags().IntVar(&queueMaxLength, "queue-length", 0, "Maximum queue length (0 = unlimited)")
 	rootCmd.Flags().StringVar(&queueOverflowStrategy, "queue-overflow", "drop-head", "Queue overflow behavior when queue-length > 0: 'drop-head', 'reject-publish', or 'reject-publish-dlx'")
+	rootCmd.Flags().IntVar(&queueCount, "queue-count", 1, "Number of queues to create per node")
 
 	experimentsList := experiments.ListExperiments()
 	helpText := fmt.Sprintf("Experiment to run: %v (Required)", experimentsList)
@@ -137,6 +139,11 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		}
 	}
 
+	// Ensure that the queue count is at least 1
+	if queueCount < 1 {
+		fatalf("Invalid queue-count: %d. Must be at least 1.", queueCount)
+	}
+
 	// Log CLI params to both stdout and log file
 	logAndPrint("---------------------------------------------------")
 	logAndPrint("Benchmark Parameters:")
@@ -144,6 +151,7 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	logAndPrint("Mgmt URL: %s", mgmtURL)
 	logAndPrint("Rmq User: %s", rmqUser)
 	logAndPrint("Queue Name: %s", queueName)
+	logAndPrint("Queue Count: %d", queueCount)
 	logAndPrint("Quorum Size: %d", quorumSize)
 	logAndPrint("Msg Size (bytes): %d", msgSize)
 	logAndPrint("Warmup (seconds): %d", warmup)
@@ -166,19 +174,20 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	}
 
 	config := experiments.Config{
-		RabbitURL:       amqpURL,
-		ManagementURL:   mgmtURL,
-		User:            rmqUser,
-		Password:        rmqPassword,
-		QueueName:       queueName,
-		QuorumSize:      quorumSize,
-		MsgSize:         msgSize,
-		WarmupSeconds:   warmup,
-		DurationSeconds: duration,
-		Publishers:      publishers,
-		Consumers:       consumers,
-		QueueMaxLength:  queueMaxLength,
+		RabbitURL:             amqpURL,
+		ManagementURL:         mgmtURL,
+		User:                  rmqUser,
+		Password:              rmqPassword,
+		QueueName:             queueName,
+		QuorumSize:            quorumSize,
+		MsgSize:               msgSize,
+		WarmupSeconds:         warmup,
+		DurationSeconds:       duration,
+		Publishers:            publishers,
+		Consumers:             consumers,
+		QueueMaxLength:        queueMaxLength,
 		QueueOverflowStrategy: queueOverflowStrategy,
+		QueueCount:            queueCount,
 	}
 	if err := exp.Setup(config, ctrl); err != nil {
 		fatalf("Failed to configure the experiment: %v", err)
@@ -194,18 +203,19 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 
 	// Write cli parameters into config file alongside results for traceability
 	benchmarkConfig := metrics.BenchmarkConfig{
-		Experiment:      experimentName,
-		StartTime:       time.Now().Format(time.RFC3339),
-		ManagementURL:   mgmtURL,
-		User:            rmqUser,
-		QueueName:       queueName,
-		QuorumSize:      quorumSize,
-		MsgSizeBytes:    msgSize,
-		WarmupSeconds:   warmup,
-		DurationSeconds: duration,
-		Publishers:      publishers,
-		Consumers:       consumers,
-		QueueMaxLength:  queueMaxLength,
+		Experiment:            experimentName,
+		StartTime:             time.Now().Format(time.RFC3339),
+		ManagementURL:         mgmtURL,
+		User:                  rmqUser,
+		QueueName:             queueName,
+		QueueCount:            queueCount,
+		QuorumSize:            quorumSize,
+		MsgSizeBytes:          msgSize,
+		WarmupSeconds:         warmup,
+		DurationSeconds:       duration,
+		Publishers:            publishers,
+		Consumers:             consumers,
+		QueueMaxLength:        queueMaxLength,
 		QueueOverflowStrategy: queueOverflowStrategy,
 	}
 	if err := rec.WriteConfig(benchmarkConfig); err != nil {
@@ -226,12 +236,16 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	signal.Notify(sigChan, os.Interrupt)
 	go func() {
 		<-sigChan
-		log.Println("\n[INTERRUPT] Gracefully cancelling benchmark...")
+		fmt.Fprintln(os.Stderr, "\n[INTERRUPT] Gracefully cancelling benchmark...")
+		log.Println("[INTERRUPT] Gracefully cancelling benchmark...")
 		cancel()
 
 		// Force exit if another interrupt is received
 		<-sigChan
-		log.Println("\n[INTERRUPT] Forcing exit...")
+		fmt.Fprintln(os.Stderr, "\n[INTERRUPT] Forcing exit...")
+		log.Println("[INTERRUPT] Forcing exit...")
+		// Restore cursor visibility
+		fmt.Fprint(os.Stderr, "\033[?25h")
 		os.Exit(130)
 	}()
 

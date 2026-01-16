@@ -61,7 +61,7 @@ variable "cluster_nodes" {
     count                = 3
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
-    size                 = "Standard_D2s_v5"
+    size                 = "Standard_D4s_v5"
     zone                 = "1"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
@@ -74,9 +74,9 @@ variable "cluster_nodes" {
     // Premium SSD v2 Data Disks to run rmq on it
     // => Cheaper than higher tier OS-disks with consistent IOPS & without burst
     data_disk = {
-      size_gb            = 32
-      iops_read_write    = 3000
-      mbps_read_write    = 125
+      size_gb            = 256
+      iops_read_write    = 10000
+      mbps_read_write    = 600
     }
     source_image = {
       publisher = "Canonical"
@@ -111,7 +111,7 @@ variable "load_generators" {
   default = {
     count                = 1
     name_prefix          = "rabbit-loadgen-node"
-    size                 = "Standard_F8s_v2"
+    size                 = "Standard_F32s_v2"
     admin_username       = "azureuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/loadgen-node-init.tpl"

@@ -29,14 +29,15 @@ import (
 )
 
 type StressLatency struct {
-	config          Config
-	ctrl            *rmq.Controller
-	leaderURL       string             // Connection URL for the leader node
-	leaderNodeIndex int                // Index of the leader node in the nodes list
-	stressConnURLs  []string           // Connection URLs for stress generation (one per node)
-	stressQueues    []string           // Queues for stress traffic (one per node)
-	conns           []*amqp.Connection // All worker connections (closed on teardown)
-	payloads        [][]byte
+	config             Config
+	ctrl               *rmq.Controller
+	leaderURL          string
+	leaderNodeIndex    int
+	stressConnURLs     []string
+	stressQueues       []string
+	stressQueuesByNode [][]string
+	conns              []*amqp.Connection
+	payloads           [][]byte
 }
 
 func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
@@ -68,15 +69,15 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 	defer conn.Close()
 
-	// Delete existing main queue to avoid PRECONDITION_FAILED when arguments change
-	chDelete, err := conn.Channel()
+	// Delete existing main queue if it already exists
+	deleteCh, err := conn.Channel()
 	if err != nil {
 		return fmt.Errorf("failed to open channel for deletion: %w", err)
 	}
 
 	log.Printf("Deleting existing queue %s (if any)...", config.QueueName)
-	_, _ = chDelete.QueueDelete(config.QueueName, false, false, false)
-	chDelete.Close()
+	_, _ = deleteCh.QueueDelete(config.QueueName, false, false, false)
+	deleteCh.Close()
 
 	ch, err := conn.Channel()
 	if err != nil {
@@ -133,57 +134,66 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 
 	e.stressConnURLs = make([]string, len(nodes))
-	e.stressQueues = make([]string, len(nodes))
+	e.stressQueues = make([]string, 0, len(nodes)*config.QueueCount)
+	e.stressQueuesByNode = make([][]string, len(nodes))
 	e.conns = make([]*amqp.Connection, 0)
 
-	// Build connection URLs and create stress queues on each node
+	// Build connection URLs and create multiple stress queues on each node
 	for i, node := range nodes {
 		connURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), node)
 		e.stressConnURLs[i] = connURL
+		e.stressQueuesByNode[i] = make([]string, config.QueueCount)
 
-		// Connect to create the stress queue
+		// Connect to create the stress queues
 		stressConn, err := ctrl.Connect(connURL)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", node, err)
 		}
 
-		// Delete existing stress queue to avoid PRECONDITION_FAILED
-		chDelete, err := stressConn.Channel()
-		if err != nil {
-			stressConn.Close()
-			return fmt.Errorf("failed to open channel for deletion: %w", err)
+		// Create multiple stress queues per node
+		for q := 0; q < config.QueueCount; q++ {
+			// Create stress queues with naming convention: <base-queue>-stress-<nodeIdx>-<queueIdx>
+			qName := fmt.Sprintf("%s-stress-%d-%d", config.QueueName, i, q)
+			e.stressQueuesByNode[i][q] = qName
+			e.stressQueues = append(e.stressQueues, qName)
+
+			// Delete existing queues with the same name as the ones
+			// that will be created during this experiment
+			deleteCh, err := stressConn.Channel()
+			if err != nil {
+				stressConn.Close()
+				return fmt.Errorf("failed to open channel for deletion: %w", err)
+			}
+
+			log.Printf("Deleting existing stress queue %s (if any)...", qName)
+			_, _ = deleteCh.QueueDelete(qName, false, false, false)
+			deleteCh.Close()
+
+			stressCh, err := stressConn.Channel()
+			if err != nil {
+				stressConn.Close()
+				return err
+			}
+
+			_, err = stressCh.QueueDeclare(
+				qName, // queue name
+				true,  // durable
+				false, // delete when unused
+				false, // exclusive
+				false, // no-wait
+				args,  // same quorum args
+			)
+			stressCh.Close()
+			if err != nil {
+				stressConn.Close()
+				return err
+			}
 		}
 
-		qName := fmt.Sprintf("%s-stress-%d", config.QueueName, i)
-		log.Printf("Deleting existing stress queue %s (if any)...", qName)
-		_, _ = chDelete.QueueDelete(qName, false, false, false)
-		chDelete.Close()
-
-		stressCh, err := stressConn.Channel()
-		if err != nil {
-			stressConn.Close()
-			return err
-		}
-
-		// Create stress queues with naming convention: <base-queue>-stress-<index>
-		e.stressQueues[i] = qName
-
-		_, err = stressCh.QueueDeclare(
-			qName, // queue name
-			true,  // durable
-			false, // delete when unused
-			false, // exclusive
-			false, // no-wait
-			args,  // same quorum args
-		)
-		stressCh.Close()
 		stressConn.Close()
-		if err != nil {
-			return err
-		}
 	}
 
-	log.Printf("Created %d stress queues across cluster nodes", len(e.stressQueues))
+	log.Printf("Created %d stress queues across %d nodes (%d queues per node)", len(e.stressQueues), len(nodes), config.QueueCount)
 	return nil
 }
 
@@ -236,10 +246,11 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 	if e.config.Consumers >= 0 {
 		const latencyConsumers = 1
 		stressConsumersPerNode := e.config.Consumers
+		queueCount := len(e.stressQueuesByNode[0])
 
 		log.Printf("Consumer Distribution (one connection per worker):")
-		log.Printf("  - Leader Node: %d Latency + %d Stress Consumers", latencyConsumers, stressConsumersPerNode)
-		log.Printf("  - Other Nodes: %d Stress Consumers", stressConsumersPerNode)
+		log.Printf("  - Leader Node: %d Latency + %d Stress Consumers across %d queues", latencyConsumers, stressConsumersPerNode, queueCount)
+		log.Printf("  - Other Nodes: %d Stress Consumers across %d queues", stressConsumersPerNode, queueCount)
 
 		// Start Latency Consumer (Leader only, one connection)
 		wg.Add(1)
@@ -253,12 +264,14 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 			e.runConsumerWithConn(ctx, conn, e.config.QueueName, rec)
 		}()
 
-		// Start Stress Consumers on all nodes (one connection each)
-		for i := range e.stressConnURLs {
-			queueName := e.stressQueues[i]
-			nodeIdx := i
+		// Start Stress Consumers on all nodes (distributed across queues via modulo)
+		for nodeIdx := range e.stressConnURLs {
+			nodeQueues := e.stressQueuesByNode[nodeIdx]
 
 			for c := 0; c < stressConsumersPerNode; c++ {
+				queueIdx := c % queueCount
+				queueName := nodeQueues[queueIdx]
+
 				wg.Add(1)
 				go func(nodeIdx int, q string) {
 					defer wg.Done()
@@ -275,13 +288,15 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 		log.Println("WARNING: Consumers set to < 0, so no consumers will be started...")
 	}
 
-	// Start Stress Publishers (one connection each)
+	// Start Stress Publishers (distributed across queues on each node)
+	queueCount := len(e.stressQueuesByNode[0])
 	stressCounter := 0
-	for i := range e.stressConnURLs {
-		queueName := e.stressQueues[i]
-		nodeIdx := i
+	for nodeIdx := range e.stressConnURLs {
+		nodeQueues := e.stressQueuesByNode[nodeIdx]
 
 		for w := 0; w < stressPublishersPerNode; w++ {
+			queueIdx := w % queueCount
+			queueName := nodeQueues[queueIdx]
 			publisherID := stressCounter
 			stressCounter++
 			wg.Add(1)

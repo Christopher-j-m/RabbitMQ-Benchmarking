@@ -27,6 +27,7 @@ type BenchmarkConfig struct {
 	ManagementURL         string `json:"management_url"`
 	User                  string `json:"user"`
 	QueueName             string `json:"queue_name"`
+	QueueCount            int    `json:"queue_count"`
 	QuorumSize            int    `json:"quorum_size"`
 	MsgSizeBytes          int    `json:"msg_size_bytes"`
 	WarmupSeconds         int    `json:"warmup_seconds"`

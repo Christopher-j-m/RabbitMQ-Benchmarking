@@ -24,13 +24,14 @@ import (
 )
 
 type LinearCapacity struct {
-	config   Config
-	ctrl     *rmq.Controller
-	nodes    []string
-	connURLs []string
-	conns    []*amqp.Connection
-	queues   []string
-	payloads [][]byte
+	config       Config
+	ctrl         *rmq.Controller
+	nodes        []string
+	connURLs     []string
+	conns        []*amqp.Connection
+	queues       []string
+	queuesByNode [][]string
+	payloads     [][]byte
 }
 
 func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
@@ -64,79 +65,88 @@ func (e *LinearCapacity) Setup(config Config, ctrl *rmq.Controller) error {
 
 	e.nodes = nodes
 	e.connURLs = make([]string, len(nodes))
-	e.queues = make([]string, len(nodes))
+	e.queues = make([]string, 0, len(nodes)*config.QueueCount)
+	e.queuesByNode = make([][]string, len(nodes))
 	e.conns = make([]*amqp.Connection, 0)
 
-	// Connect to each discovered node and create a new quorum queue
+	// Connect to each discovered node and create multiple quorum queues per node
 	for i, node := range nodes {
 		// Build the connection string for the curr node
 		connURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), node)
 		e.connURLs[i] = connURL
+		e.queuesByNode[i] = make([]string, config.QueueCount)
 
-		// Set the queue name based on the given base name and node index
-		// e.g. queue "test-queue" becomes "test-queue-0", "test-queue-1", ... on each node
-		qName := fmt.Sprintf("%s-%d", config.QueueName, i)
-		e.queues[i] = qName
-
-		// Connect to create the queue
+		// Connect to create the queues
 		conn, err := ctrl.Connect(connURL)
 		if err != nil {
 			return fmt.Errorf("failed to connect to node %s: %w", node, err)
 		}
 
-		// Delete existing queues with the same name as the ones
-		// that will be created during this experiment
-		chDelete, err := conn.Channel()
-		if err != nil {
-			conn.Close()
-			return fmt.Errorf("failed to create delete channel: %w", err)
-		}
+		// Create multiple queues per node
+		for q := 0; q < config.QueueCount; q++ {
+			// Set the queue name based on the given base name, node index, and sub-queue index
+			// e.g. queue "test-queue" becomes "test-queue-0-0", "test-queue-0-1", ... on node 0
+			qName := fmt.Sprintf("%s-%d-%d", config.QueueName, i, q)
+			e.queuesByNode[i][q] = qName
+			e.queues = append(e.queues, qName)
 
-		log.Printf("Deleting existing queue %s...", qName)
-		_, _ = chDelete.QueueDelete(qName, false, false, false)
-		chDelete.Close()
-
-		// Create a channel for queue declaration
-		ch, err := conn.Channel()
-		if err != nil {
-			conn.Close()
-			return err
-		}
-
-		// Configure the queue as a quorum queue with the replication group size.
-		args := amqp.Table{
-			"x-queue-type":                "quorum",
-			"x-quorum-initial-group-size": config.QuorumSize,
-		}
-
-		// Add max-length and overflow settings if specified
-		// This allows running throughput tests without consumers by dropping messages automatically
-		// => This observably reduced the cpu usage on the cluster nodes, which in turn allows higher throughput in many cases
-		if config.QueueMaxLength > 0 {
-			args["x-max-length"] = config.QueueMaxLength
-			if config.QueueOverflowStrategy != "" {
-				args["x-overflow"] = config.QueueOverflowStrategy
+			// Delete existing queues with the same name as the ones
+			// that will be created during this experiment
+			deleteCh, err := conn.Channel()
+			if err != nil {
+				conn.Close()
+				return fmt.Errorf("failed to create delete channel: %w", err)
 			}
-			log.Printf("Queue %s: queue-length=%d, queue-overflow=%s", qName, config.QueueMaxLength, config.QueueOverflowStrategy)
+
+			log.Printf("Deleting existing queue %s...", qName)
+			_, _ = deleteCh.QueueDelete(qName, false, false, false)
+			deleteCh.Close()
+
+			// Create a channel for queue declaration
+			ch, err := conn.Channel()
+			if err != nil {
+				conn.Close()
+				return err
+			}
+
+			// Configure the queue as a quorum queue with the replication group size.
+			args := amqp.Table{
+				"x-queue-type":                "quorum",
+				"x-quorum-initial-group-size": config.QuorumSize,
+			}
+
+			// Add max-length and overflow settings if specified
+			// This allows running throughput tests without consumers by dropping messages automatically
+			// => This observably reduced the cpu usage on the cluster nodes, which in turn allows higher throughput in many cases
+			if config.QueueMaxLength > 0 {
+				args["x-max-length"] = config.QueueMaxLength
+				if config.QueueOverflowStrategy != "" {
+					args["x-overflow"] = config.QueueOverflowStrategy
+				}
+				log.Printf("Queue %s: queue-length=%d, queue-overflow=%s", qName, config.QueueMaxLength, config.QueueOverflowStrategy)
+			}
+
+			// Create the quorum queue
+			_, err = ch.QueueDeclare(
+				qName, // queue name
+				true,  // durable - survives broker restarts
+				false, // delete when unused
+				false, // exclusive - not limited to this connection
+				false, // no-wait - wait for rmq ack that queue is created
+				args,  // optional args
+			)
+
+			ch.Close()
+			if err != nil {
+				conn.Close()
+				return err
+			}
 		}
 
-		// Create the quorum queue
-		_, err = ch.QueueDeclare(
-			qName, // queue name
-			true,  // durable - survives broker restarts
-			false, // delete when unused
-			false, // exclusive - not limited to this connection
-			false, // no-wait - wait for rmq ack that queue is created
-			args,  // optional args
-		)
-
-		ch.Close()
 		conn.Close()
-		if err != nil {
-			return err
-		}
 	}
 
+	log.Printf("Created %d queues across %d nodes (%d queues per node)", len(e.queues), len(nodes), config.QueueCount)
 	return nil
 }
 
@@ -177,17 +187,21 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 	}
 
 	// Start the specified number of consumers on each queue
+	// Consumers are distributed mostly evenly (modulo) across all queues on each node
 	if e.config.Consumers > 0 {
-		consumersPerQueue := e.config.Consumers
-		totalConsumers := e.config.Consumers * len(e.queues)
+		consumersPerNode := e.config.Consumers
+		queueCount := len(e.queuesByNode[0])
+		totalConsumers := consumersPerNode * len(e.nodes)
 
-		log.Printf("Starting %d consumers per queue (Total: %d)...", consumersPerQueue, totalConsumers)
+		log.Printf("Starting %d consumers per node distributed across %d queues (Total: %d)...", consumersPerNode, queueCount, totalConsumers)
 
-		for i := range e.nodes {
-			queueName := e.queues[i]
-			nodeIdx := i
+		for nodeIdx := range e.nodes {
+			queuesByNode := e.queuesByNode[nodeIdx]
 
-			for c := 0; c < consumersPerQueue; c++ {
+			for c := 0; c < consumersPerNode; c++ {
+				queueIdx := c % queueCount
+				queueName := queuesByNode[queueIdx]
+
 				wg.Add(1)
 				go func(nodeIdx int, q string) {
 					defer wg.Done()
@@ -247,17 +261,20 @@ func (e *LinearCapacity) Run(ctx context.Context, publishers int, rec *metrics.R
 	}
 
 	// Start the specified number of publishers on each node
+	// Publishers are distributed mostly evenly (modulo) across all queues on each node
 	publishersPerNode := publishers
+	queueCount := len(e.queuesByNode[0])
 	totalPublishers := publishers * len(e.nodes)
 
-	log.Printf("Starting %d publishers per node (Total: %d)...", publishersPerNode, totalPublishers)
+	log.Printf("Starting %d publishers per node distributed across %d queues (Total: %d)...", publishersPerNode, queueCount, totalPublishers)
 
 	publisherCounter := 0
-	for i := range e.nodes {
-		queueName := e.queues[i]
-		nodeIdx := i
+	for nodeIdx := range e.nodes {
+		queuesByNode := e.queuesByNode[nodeIdx]
 
 		for w := 0; w < publishersPerNode; w++ {
+			queueIdx := w % queueCount
+			queueName := queuesByNode[queueIdx]
 			publisherID := publisherCounter
 			publisherCounter++
 			wg.Add(1)
