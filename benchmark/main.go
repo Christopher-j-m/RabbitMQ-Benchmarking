@@ -259,6 +259,12 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	mon.StartDisplay()
 	defer mon.Stop()
 
+	// Handle cleanup display when context is cancelled
+	go func() {
+		<-ctx.Done()
+		mon.DisplayCleanup()
+	}()
+
 	summary, err := exp.Run(ctx, publishers, rec)
 
 	// Finish display

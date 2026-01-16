@@ -39,6 +39,7 @@ type Phase int
 const (
 	PhaseWarmup Phase = iota
 	PhaseMeasure
+	PhaseFinished
 )
 
 // Current system metrics of the load generator
@@ -122,8 +123,39 @@ func (m *Monitor) Stop() {
 	fmt.Fprint(os.Stderr, "\033[?25h")
 }
 
+// Clears the progress bar
+func (m *Monitor) DisplayCleanup() {
+	if m.displayTicker != nil {
+		m.displayTicker.Stop()
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Set phase to finished
+	elapsed := m.config.TotalSeconds
+	stats := m.currentStats
+	phase := PhaseFinished
+
+	if m.linesRendered > 0 {
+		fmt.Fprintf(os.Stderr, "\033[%dA", m.linesRendered)
+	}
+
+	output := m.buildDisplay(stats, elapsed, phase)
+	fmt.Fprint(os.Stderr, output)
+
+	// Print waiting message
+	// => Especially the linear capacity exp. can take a while to shutdown publishers/consumers
+	msg := "\nGracefully stopping the publishers/consumers (this may take a moment)..."
+	fmt.Fprint(os.Stderr, msg)
+	m.linesRendered = strings.Count(output, "\n") + 1
+}
+
 // Cleanup progress and print final state
 func (m *Monitor) FinishDisplay() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	if m.linesRendered > 0 {
 		for i := 0; i < m.linesRendered; i++ {
 			fmt.Fprint(os.Stderr, "\033[2K") // Clear line
@@ -135,11 +167,8 @@ func (m *Monitor) FinishDisplay() {
 	}
 
 	// Print completion message
-	elapsed := m.config.TotalSeconds
-	timeStr := formatDuration(elapsed)
-	fmt.Fprintf(os.Stderr, "%s%s✓%s Benchmark completed in %s%s%s\n",
-		colorBold, colorGreen, colorReset,
-		colorCyan, timeStr, colorReset)
+	fmt.Fprintf(os.Stderr, "%s%s✓%s Benchmark finished\n",
+		colorBold, colorGreen, colorReset)
 
 	// Show cursor again
 	fmt.Fprint(os.Stderr, "\033[?25h")
@@ -167,14 +196,19 @@ func (m *Monitor) displayLoop() {
 
 // Rneder the entire display of system stats and progress bar
 func (m *Monitor) render() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	elapsed := int(time.Since(m.startTime).Seconds())
 	if elapsed > m.config.TotalSeconds {
 		elapsed = m.config.TotalSeconds
 	}
 
-	stats := m.GetStats()
+	stats := m.currentStats
 	phase := PhaseWarmup
-	if elapsed > m.config.WarmupSeconds {
+	if elapsed >= m.config.TotalSeconds {
+		phase = PhaseFinished
+	} else if elapsed > m.config.WarmupSeconds {
 		phase = PhaseMeasure
 	}
 
@@ -213,7 +247,9 @@ func (m *Monitor) buildDisplay(stats SystemStats, elapsed int, phase Phase) stri
 func (m *Monitor) buildStatsLine(stats SystemStats, phase Phase) string {
 	// Phase indicator
 	var phaseStr string
-	if phase == PhaseWarmup {
+	if phase == PhaseFinished {
+		phaseStr = fmt.Sprintf("%s%s● FINISHED%s", colorBold, colorBlue, colorReset)
+	} else if phase == PhaseWarmup {
 		phaseStr = fmt.Sprintf("%s%s● WARMUP %s", colorBold, colorYellow, colorReset)
 	} else {
 		phaseStr = fmt.Sprintf("%s%s● MEASURE%s", colorBold, colorGreen, colorReset)
@@ -227,7 +263,7 @@ func (m *Monitor) buildStatsLine(stats SystemStats, phase Phase) string {
 	// Separator between stats
 	sep := fmt.Sprintf("%s│%s", colorDim, colorReset)
 
-	return fmt.Sprintf("  %s %s %s %s %s %s %s", phaseStr, sep, cpuStr, sep, diskStr, sep, netStr)
+	return fmt.Sprintf("%s %s %s %s %s %s %s", phaseStr, sep, cpuStr, sep, diskStr, sep, netStr)
 }
 
 // Create the progress bar with elapsed & total time
@@ -286,7 +322,7 @@ func (m *Monitor) buildProgressLine(elapsed int, phase Phase) string {
 	bar.WriteString(fmt.Sprintf("%s]%s", colorDim, colorReset))
 
 	// Combine progress bar + percentage + time
-	return fmt.Sprintf("  %s %s%s%s  %s%s%s",
+	return fmt.Sprintf("%s %s%s%s  %s%s%s",
 		bar.String(),
 		colorBold, percentStr, colorReset,
 		colorCyan, timeStr, colorReset)

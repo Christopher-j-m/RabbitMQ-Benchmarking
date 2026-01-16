@@ -311,6 +311,8 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 					// This ensures the cluster is stressed by waiting for replication.
 					// Latency is recorded by consumers, not here.
 					select {
+					case <-ctx.Done():
+						return
 					case conf := <-confirms:
 						if !conf.Ack {
 							// Nack or error

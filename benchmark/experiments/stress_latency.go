@@ -507,6 +507,8 @@ func (e *StressLatency) runLatencyPublisherWithConn(ctx context.Context, conn *a
 
 			// Wait for ACK
 			select {
+			case <-ctx.Done():
+				return
 			case conf := <-confirms:
 				if !conf.Ack {
 					rec.RecordError()

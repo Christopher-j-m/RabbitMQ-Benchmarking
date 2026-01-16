@@ -283,6 +283,8 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 					// Block until the Raft consensus completes and the server sends an ACK.
 					// This time includes: follower -> leader forwarding + Raft consensus + ACK return
 					select {
+					case <-ctx.Done():
+						return
 					case conf := <-confirms:
 						if conf.Ack {
 							// Record the full round-trip time (includes proxy overhead)
