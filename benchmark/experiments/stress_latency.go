@@ -175,13 +175,29 @@ func (e *StressLatency) Setup(config Config, ctrl *rmq.Controller) error {
 				return err
 			}
 
+			// Configure stress queue arguments, which are different from latency queue
+			stressArgs := amqp.Table{
+				"x-queue-type":                "quorum",
+				"x-quorum-initial-group-size": config.QuorumSize,
+			}
+
+			// Add max-length and overflow settings if specified
+			// This allows omitting spawning consumers by dropping messages automatically
+			if config.QueueMaxLength > 0 {
+				stressArgs["x-max-length"] = config.QueueMaxLength
+				if config.QueueOverflowStrategy != "" {
+					stressArgs["x-overflow"] = config.QueueOverflowStrategy
+				}
+				log.Printf("Stress queue %s: max-length=%d, overflow=%s", qName, config.QueueMaxLength, config.QueueOverflowStrategy)
+			}
+
 			_, err = stressCh.QueueDeclare(
-				qName, // queue name
-				true,  // durable
-				false, // delete when unused
-				false, // exclusive
-				false, // no-wait
-				args,  // same quorum args
+				qName,      // queue name
+				true,       // durable
+				false,      // delete when unused
+				false,      // exclusive
+				false,      // no-wait
+				stressArgs, // stress-specific quorum args
 			)
 			stressCh.Close()
 			if err != nil {
@@ -223,19 +239,6 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 		connMu.Unlock()
 		return conn, nil
 	}
-
-	// PUBLISHERS
-	// Leader Node:
-	// - Latency Publishers: Fixed at 1 publisher
-	// - Stress Publishers: as specified via 'publishers' param
-	// Non-leader Nodes:
-	// - Stress Publishers: as specified via 'publishers' param
-	const latencyPublishers = 1
-	stressPublishersPerNode := publishers
-
-	log.Printf("Publisher Distribution (one connection per worker):")
-	log.Printf("  - Leader Node: %d Latency + %d Stress Publishers", latencyPublishers, stressPublishersPerNode)
-	log.Printf("  - Other Nodes: %d Stress Publishers", stressPublishersPerNode)
 
 	// CONSUMERS
 	// Leader Node:
@@ -288,7 +291,19 @@ func (e *StressLatency) Run(ctx context.Context, publishers int, rec *metrics.Re
 		log.Println("WARNING: Consumers set to < 0, so no consumers will be started...")
 	}
 
-	// Start Stress Publishers (distributed across queues on each node)
+	// PUBLISHERS
+	// Leader Node:
+	// - Latency Publishers: Fixed at 1 publisher
+	// - Stress Publishers: as specified via 'publishers' param
+	// Non-leader Nodes:
+	// - Stress Publishers: as specified via 'publishers' param
+	const latencyPublishers = 1
+	stressPublishersPerNode := publishers
+
+	log.Printf("Publisher Distribution (one connection per worker):")
+	log.Printf("  - Leader Node: %d Latency + %d Stress Publishers", latencyPublishers, stressPublishersPerNode)
+	log.Printf("  - Other Nodes: %d Stress Publishers", stressPublishersPerNode)
+	
 	queueCount := len(e.stressQueuesByNode[0])
 	stressCounter := 0
 	for nodeIdx := range e.stressConnURLs {
