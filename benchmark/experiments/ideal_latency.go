@@ -116,22 +116,9 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 
 func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
 	var wg sync.WaitGroup
-	var connMu sync.Mutex
 
-	// Helper to create and track a new connection
-	createConnection := func() (*amqp.Connection, error) {
-		conn, err := e.ctrl.Connect(e.leaderURL)
-		if err != nil {
-			return nil, err
-		}
-		connMu.Lock()
-		e.conns = append(e.conns, conn)
-		connMu.Unlock()
-
-		// Listen for amqp.Blocking alarms on the connection with the leader node.
-		// These alarms (memory/disk pressure) are logged to detect conditions that
-		// invalidate the measurements
-		// => https://www.rabbitmq.com/docs/connection-blocked
+	// Monitor cnnection for blocked notifications
+	monitorConnection := func(conn *amqp.Connection) {
 		blockings := conn.NotifyBlocked(make(chan amqp.Blocking))
 		go func(c <-chan amqp.Blocking) {
 			var blockStart time.Time
@@ -145,193 +132,183 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 				}
 			}
 		}(blockings)
-
-		return conn, nil
 	}
 
-	// CONSUMERS
-	// Consumers are started to drain the queue immediately and record end-to-end latency.
-	// They extract the timestamp from the message header and calculate the latency.
-	if e.config.Consumers > 0 {
-		log.Printf("Starting %d consumers...", e.config.Consumers)
-		for i := 0; i < e.config.Consumers; i++ {
-			wg.Add(1)
-			go func(rec *metrics.Recorder) {
-				defer wg.Done()
+	// Create Consumer Connection
+	consumerConn, err := e.ctrl.Connect(e.leaderURL)
+	if err != nil {
+		return metrics.Summary{}, fmt.Errorf("consumer failed to create connection: %w", err)
+	}
+	e.conns = append(e.conns, consumerConn)
+	monitorConnection(consumerConn)
 
-				conn, err := createConnection()
-				if err != nil {
-					log.Printf("Consumer failed to create connection: %v", err)
+	// Create Publisher Connection
+	publisherConn, err := e.ctrl.Connect(e.leaderURL)
+	if err != nil {
+		return metrics.Summary{}, fmt.Errorf("publisher failed to create connection: %w", err)
+	}
+	e.conns = append(e.conns, publisherConn)
+	monitorConnection(publisherConn)
+
+	// CONSUMER
+	// Consumer is started to drain the queue immediately and record end-to-end latency.
+	// It extracts the timestamp from the message header and calculates the latency.
+	log.Printf("Starting 1 consumer (fixed for Ideal Latency)...")
+
+	wg.Add(1)
+	go func(conn *amqp.Connection, rec *metrics.Recorder) {
+		defer wg.Done()
+
+		ch, err := conn.Channel()
+		if err != nil {
+			log.Printf("Consumer failed to create channel: %v", err)
+			return
+		}
+		defer ch.Close()
+
+		// Start consuming messages
+		msgs, err := ch.Consume(
+			e.config.QueueName, // queue
+			"",                 // consumer - unique consumer identifier
+			false,              // auto-ack - consumer must ack msgs
+			false,              // exclusive - not the only consumer for this queue
+			false,              // no-local - allow consuming msgs from the same connection
+			false,              // no-wait - wait for rmq confirmation that consumer is registered
+			nil,                // optional args
+		)
+		if err != nil {
+			log.Printf("Consumer failed to start consuming: %v", err)
+			return
+		}
+
+		// Local batch for latency recording to avoid lock contention
+		const batchSize = 100
+		latencyBatch := make([]int64, 0, batchSize)
+
+		// Consume messages and record end-to-end latency
+		for {
+			select {
+			case <-ctx.Done():
+				// Flush remaining latencies
+				if len(latencyBatch) > 0 {
+					rec.RecordLatencyBatch(latencyBatch)
+				}
+				return
+			case d, ok := <-msgs:
+				if !ok {
+					if len(latencyBatch) > 0 {
+						rec.RecordLatencyBatch(latencyBatch)
+					}
 					return
 				}
 
-				ch, err := conn.Channel()
-				if err != nil {
-					log.Printf("Consumer failed to create channel: %v", err)
-					return
-				}
-				defer ch.Close()
-
-				// Set QoS for the consumer channel to prefetch 50 messages
-				// Consumers will receive up to 50 unacknowledged messages at a time
-				// => Prevents flooding the consumer with too many messages
-				if err := ch.Qos(50, 0, false); err != nil {
-					log.Printf("Consumer failed to set QoS: %v", err)
-					return
-				}
-
-				// Start consuming messages
-				msgs, err := ch.Consume(
-					e.config.QueueName, // queue
-					"",                 // consumer - unique consumer identifier
-					false,              // auto-ack - consumer must ack msgs
-					false,              // exclusive - not the only consumer for this queue
-					false,              // no-local - allow consuming msgs from the same connection
-					false,              // no-wait - wait for rmq confirmation that consumer is registered
-					nil,                // optional args
-				)
-				if err != nil {
-					log.Printf("Consumer failed to start consuming: %v", err)
-					return
-				}
-
-				// Local batch for latency recording to avoid lock contention
-				const batchSize = 100
-				latencyBatch := make([]int64, 0, batchSize)
-
-				// Consume messages and record end-to-end latency
-				for {
-					select {
-					case <-ctx.Done():
-						// Flush remaining latencies
-						if len(latencyBatch) > 0 {
+				// Extract timestamp from header and calculate end-to-end latency
+				if sentAt, ok := d.Headers["x-sent-at"]; ok {
+					if sentTimestamp, ok := sentAt.(int64); ok {
+						latencyNs := time.Now().UnixNano() - sentTimestamp
+						latencyUs := latencyNs / 1000 // Convert to microseconds
+						latencyBatch = append(latencyBatch, latencyUs)
+						if len(latencyBatch) >= batchSize {
 							rec.RecordLatencyBatch(latencyBatch)
+							latencyBatch = latencyBatch[:0]
 						}
-						return
-					case d, ok := <-msgs:
-						if !ok {
-							if len(latencyBatch) > 0 {
-								rec.RecordLatencyBatch(latencyBatch)
-							}
-							return
-						}
-
-						// Extract timestamp from header and calculate end-to-end latency
-						if sentAt, ok := d.Headers["x-sent-at"]; ok {
-							if sentTimestamp, ok := sentAt.(int64); ok {
-								latencyNs := time.Now().UnixNano() - sentTimestamp
-								latencyUs := latencyNs / 1000 // Convert to microseconds
-								latencyBatch = append(latencyBatch, latencyUs)
-								if len(latencyBatch) >= batchSize {
-									rec.RecordLatencyBatch(latencyBatch)
-									latencyBatch = latencyBatch[:0]
-								}
-							}
-						}
-
-						d.Ack(false)
 					}
 				}
-			}(rec)
+
+				d.Ack(false)
+			}
 		}
-	}
+	}(consumerConn, rec)
 
-	// PUBLISHERS
-	// Publishers publish and wait for a ack for every message
-	log.Printf("Starting %d publishers...", publishers)
-	for i := 0; i < publishers; i++ {
-		wg.Add(1)
-		go func(publisherID int) {
-			defer wg.Done()
+	// PUBLISHER
+	// Publishes and waits for a ack for every message
+	log.Printf("Starting 1 publisher (fixed for Ideal Latency)...")
 
-			conn, err := createConnection()
-			if err != nil {
-				log.Printf("Publisher failed to create connection: %v", err)
+	wg.Add(1)
+	go func(conn *amqp.Connection, publisherID int) {
+		defer wg.Done()
+
+		// Local RNG to avoid global mutex contention
+		// => https://go.dev/blog/randv2
+		rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
+
+		ch, err := conn.Channel()
+		if err != nil {
+			log.Printf("Publisher failed to create channel: %v", err)
+			return
+		}
+		defer ch.Close()
+
+		// Enable Publisher Confirms on this channel
+		// RMQ sends an ack for every published message once it is
+		// replicated to all the other nodes (quorum)
+		// => Mandatory for measuring the Raft replication latency,
+		// ... which is the main objective of this experiment
+		if err := ch.Confirm(false); err != nil {
+			log.Printf("Publisher failed to enable confirms: %v", err)
+			return
+		}
+
+		// Create a specific channel for this specific publisher confirmations
+		// Buffer size 1: Publisher can't send another message until the previous one
+		// is confirmed by rmq
+		// => Message throughput is effectively throttled by the Raft consensus latency
+		confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+
+		for {
+			select {
+			case <-ctx.Done():
 				return
-			}
+			default:
+				payload := e.payloads[rng.IntN(len(e.payloads))]
 
-			// Local RNG to avoid global mutex contention
-			// => https://go.dev/blog/randv2
-			rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
+				// Publish the message with timestamp header for end-to-end latency calculation
+				err := ch.PublishWithContext(ctx,
+					"",                 // exchange - default: route to queue with name equal to routing key
+					e.config.QueueName, // routing key (queue name)
+					false,              // mandatory - unroutable messages are dropped
+					false,              // immediate - no immediate delivery
+					amqp.Publishing{
+						ContentType: "text/plain",
+						Headers:     amqp.Table{"x-sent-at": time.Now().UnixNano()},
+						Body:        payload,
+					},
+				)
 
-			ch, err := conn.Channel()
-			if err != nil {
-				log.Printf("Publisher failed to create channel: %v", err)
-				return
-			}
-			defer ch.Close()
+				if err != nil {
+					if err == amqp.ErrClosed {
+						return
+					}
+					// Backoff on error
+					rec.RecordError()
+					time.Sleep(50 * time.Millisecond)
+					continue
+				}
 
-			// Enable Publisher Confirms on this channel
-			// RMQ sends an ack for every published message once it is
-			// replicated to all the other nodes (quorum)
-			// => Mandatory for measuring the Raft replication latency,
-			// ... which is the main objective of this experiment
-			if err := ch.Confirm(false); err != nil {
-				log.Printf("Publisher failed to enable confirms: %v", err)
-				return
-			}
-
-			// Create a specific channel for this specific publisher confirmations
-			// Buffer size 1: Publisher can't send another message until the previous one
-			// is confirmed by rmq
-			// => Message throughput is effectively throttled by the Raft consensus latency
-			confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
-
-			for {
+				// Block until the Raft consensus completes and the server sends an ACK.
+				// This ensures the cluster is stressed by waiting for replication.
+				// Latency is recorded by consumers, not here.
 				select {
 				case <-ctx.Done():
 					return
-				default:
-					payload := e.payloads[rng.IntN(len(e.payloads))]
-
-					// Publish the message with timestamp header for end-to-end latency calculation
-					err := ch.PublishWithContext(ctx,
-						"",                 // exchange - default: route to queue with name equal to routing key
-						e.config.QueueName, // routing key (queue name)
-						false,              // mandatory - unroutable messages are dropped
-						false,              // immediate - no immediate delivery
-						amqp.Publishing{
-							ContentType: "text/plain",
-							Headers:     amqp.Table{"x-sent-at": time.Now().UnixNano()},
-							Body:        payload,
-						},
-					)
-
-					if err != nil {
-						if err == amqp.ErrClosed {
-							return
-						}
-						// Backoff on error
+				case conf := <-confirms:
+					if !conf.Ack {
+						// Nack or error
 						rec.RecordError()
-						time.Sleep(50 * time.Millisecond)
-						continue
 					}
 
-					// Block until the Raft consensus completes and the server sends an ACK.
-					// This ensures the cluster is stressed by waiting for replication.
-					// Latency is recorded by consumers, not here.
-					select {
-					case <-ctx.Done():
-						return
-					case conf := <-confirms:
-						if !conf.Ack {
-							// Nack or error
-							rec.RecordError()
-						}
+				// Handle cases where rmq is overloaded and doesn't respond in time
+				// This allows us to capture latency spikes without erroring out
+				case <-time.After(30 * time.Second):
+					log.Printf("Publisher timed out waiting for confirm")
+					rec.RecordError()
 
-					// Handle cases where rmq is overloaded and doesn't respond in time
-					// This allows us to capture latency spikes without erroring out
-					case <-time.After(30 * time.Second):
-						log.Printf("Publisher timed out waiting for confirm")
-						rec.RecordError()
-
-						// Our last resort: backoff for 1-3 seconds before trying again
-						time.Sleep(time.Duration(1000+rng.IntN(2000)) * time.Millisecond)
-					}
+					// Our last resort: backoff for 1-3 seconds before trying again
+					time.Sleep(time.Duration(1000+rng.IntN(2000)) * time.Millisecond)
 				}
 			}
-		}(i)
-	}
+		}
+	}(publisherConn, 0)
 
 	// Wait for the go context to be canceled and all coroutines to exit gracefully
 	wg.Wait()

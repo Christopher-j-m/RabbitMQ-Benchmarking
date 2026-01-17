@@ -144,6 +144,13 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		fatalf("Invalid queue-count: %d. Must be at least 1.", queueCount)
 	}
 
+	// For the ideal-latency experiment, we fix publishers and consumers to 1
+	// to measure the theoretical floor of Raft latency.
+	if experimentName == experiments.ExperimentIdealLatency {
+		publishers = 1
+		consumers = 1
+	}
+
 	// Log CLI params to both stdout and log file
 	logAndPrint("---------------------------------------------------")
 	logAndPrint("Benchmark Parameters:")
