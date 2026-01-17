@@ -355,7 +355,12 @@ func (e *StressLatency) runConsumerWithConn(ctx context.Context, conn *amqp.Conn
 		log.Printf("Consumer failed to create channel: %v", err)
 		return
 	}
-	defer ch.Close()
+
+	// Close channel when context is done to unblock the consumer
+	go func() {
+		<-ctx.Done()
+		ch.Close()
+	}()
 
 	if err := ch.Qos(50, 0, false); err != nil {
 		log.Printf("Consumer failed to set QoS: %v", err)
@@ -383,39 +388,38 @@ func (e *StressLatency) runConsumerWithConn(ctx context.Context, conn *amqp.Conn
 		latencyBatch = make([]int64, 0, batchSize)
 	}
 
-	for {
+	for d := range msgs {
+		// Check if context is done
 		select {
 		case <-ctx.Done():
-			// Flush remaining latencies
 			if rec != nil && len(latencyBatch) > 0 {
 				rec.RecordLatencyBatch(latencyBatch)
 			}
 			return
-		case d, ok := <-msgs:
-			if !ok {
-				if rec != nil && len(latencyBatch) > 0 {
-					rec.RecordLatencyBatch(latencyBatch)
-				}
-				return
-			}
+		default:
+		}
 
-			// Extract timestamp from header and calculate end-to-end latency
-			if rec != nil {
-				if sentAt, ok := d.Headers["x-sent-at"]; ok {
-					if sentTimestamp, ok := sentAt.(int64); ok {
-						latencyNs := time.Now().UnixNano() - sentTimestamp
-						latencyUs := latencyNs / 1000 // Convert to microseconds
-						latencyBatch = append(latencyBatch, latencyUs)
-						if len(latencyBatch) >= batchSize {
-							rec.RecordLatencyBatch(latencyBatch)
-							latencyBatch = latencyBatch[:0]
-						}
+		// Extract timestamp from header and calculate end-to-end latency
+		if rec != nil {
+			if sentAt, ok := d.Headers["x-sent-at"]; ok {
+				if sentTimestamp, ok := sentAt.(int64); ok {
+					latencyNs := time.Now().UnixNano() - sentTimestamp
+					latencyUs := latencyNs / 1000 // Convert to microseconds
+					latencyBatch = append(latencyBatch, latencyUs)
+					if len(latencyBatch) >= batchSize {
+						rec.RecordLatencyBatch(latencyBatch)
+						latencyBatch = latencyBatch[:0]
 					}
 				}
 			}
-
-			d.Ack(false)
 		}
+
+		d.Ack(false)
+	}
+
+	// Flush remaining latencies when channel closes
+	if rec != nil && len(latencyBatch) > 0 {
+		rec.RecordLatencyBatch(latencyBatch)
 	}
 }
 
