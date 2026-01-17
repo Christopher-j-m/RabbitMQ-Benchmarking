@@ -1,7 +1,8 @@
 // Linear Capacity Experiment
 //
-// Measures the maximum sustainable throughput of an rmq cluster with a given number of publishers and consumers.
-// The total amount of publishers is distributed evenly across all nodes in the cluster to stress all nodes equally.
+// Measures the throughput of a RabbitMQ cluster. To bypass the single-threaded bottleneck
+// of individual Erlang queue processes, this experiment supports creating multiple queues per node in order to allow 
+// maximizing throughput.
 //
 // Publishers: Send messages as fast as possible without waiting for confirms
 // Consumers: Consume messages as fast as possible and ack them in order to free up memory and avoid blocks on the nodes

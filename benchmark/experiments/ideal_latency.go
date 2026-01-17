@@ -1,13 +1,11 @@
-// Raft Latency Experiment
+// Ideal Latency Experiment
 //
-// Measures the latency cost imposed by the Raft consensus in rmq quorum queues.
-// This experiment forces publishers to wait for a confirmed write (ACK)
-// from the cluster for every message, measuring the round-trip time required for
-// successful replication across replicas in the cluster.
+// Measures the latency cost imposed by the Raft consensus in rmq quorum queues under ideal conditions
+// with a fixed a fixed 1-publisher/1-consumer setup connected directly to the queue leader node.
 // => Inject timestamp into message headers for end-to-end latency calculation.
 //
-// Publishers: Send messages synchronously, waiting for a ack before sending the next one.
-// Consumers: Consume messages immediately to prevent queue backlog from influencing latency measurements.
+// Publisher: Send messages synchronously, waiting for a ack before sending the next one. 
+// Consumer: Extracts 'x-sent-at' headers for latency calculation.
 // Metrics: Latency (P99, P95, Mean)
 package experiments
 

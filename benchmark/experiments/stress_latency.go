@@ -4,12 +4,13 @@
 // This experiment combines the latency measurement approach from ideal_latency with
 // heavy stress generation (fire-and-forget publishers) similar to linear_capacity.
 //
-// This simulates worst-case performance scenarios where the cluster is under
-// heavy load and we want to measure the end-to-end latency experienced.
+// This simulates worst-case performance scenarios where the cluster is under heavy load 
+// and we measure the end-to-end latency that a single publisher/consumer pair experiences.
 //
 // Stress Publishers: Send messages as fast as possible without waiting for confirms (not used for measurements, just to stress the cluster)
-// Latency Publishers: Send messages synchronously, waiting for ACK, inject timestamp in headers (used for latency measurements)
-// Consumers: Extract timestamp from headers to calculate end-to-end latency
+// Stress Consumers: Consume messages as fast as possible to prevent queue backlog from influencing latency measurements (Optional)
+// Latency Publisher: Send messages synchronously, waiting for ACK, inject timestamp in headers for latency measurements
+// Latency Consumer: Extracts timestamp from headers to calculate end-to-end latency
 // Metrics: End-to-End Latency (P99, P95, Mean)
 package experiments
 
