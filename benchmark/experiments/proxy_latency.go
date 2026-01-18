@@ -25,21 +25,21 @@ import (
 )
 
 type ProxyLatency struct {
-	config   Config
-	ctrl     *rmq.Controller
-	conn     *amqp.Connection
-	payloads [][]byte
+	config     Config
+	controller *rmq.Controller
+	connection *amqp.Connection
+	payloads   [][]byte
 }
 
-func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
-	e.config = config
-	e.ctrl = ctrl
+func (experiment *ProxyLatency) Setup(config Config, controller *rmq.Controller) error {
+	experiment.config = config
+	experiment.controller = controller
 
 	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
 	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
-	e.payloads = make([][]byte, 1000)
-	for i := range e.payloads {
+	experiment.payloads = make([][]byte, 1000)
+	for i := range experiment.payloads {
 		size := 1024 + rand.IntN(4096)
 		text := faker.Paragraph()
 		b := make([]byte, size)
@@ -49,18 +49,18 @@ func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
 				b[j] = byte(rand.IntN(256))
 			}
 		}
-		e.payloads[i] = b
+		experiment.payloads[i] = b
 	}
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
 	// Connect to cluster to declare queue
-	connTemp, err := ctrl.Connect(config.RabbitURL)
+	tempConnection, err := controller.Connect(config.RabbitURL)
 	if err != nil {
 		return err
 	}
-	ch, err := connTemp.Channel()
+	amqpChannel, err := tempConnection.Channel()
 	if err != nil {
-		connTemp.Close()
+		tempConnection.Close()
 		return err
 	}
 
@@ -70,7 +70,7 @@ func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
 		"x-quorum-initial-group-size": config.QuorumSize,
 	}
 
-	_, err = ch.QueueDeclare(
+	_, err = amqpChannel.QueueDeclare(
 		config.QueueName, // name
 		true,             // durable
 		false,            // delete when unused
@@ -78,20 +78,20 @@ func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
 		false,            // no-wait
 		args,             // arguments
 	)
-	ch.Close()
-	connTemp.Close()
+	amqpChannel.Close()
+	tempConnection.Close()
 	if err != nil {
 		return err
 	}
 
 	// Find the leader node for the created quorum queue
-	leaderNode, err := ctrl.GetQueueLeaderNode("/", config.QueueName)
+	leaderNode, err := controller.GetQueueLeaderNode("/", config.QueueName)
 	if err != nil {
 		return err
 	}
 
 	// Discover all cluster nodes and find a non-leader node
-	nodes, err := ctrl.GetNodes()
+	nodes, err := controller.GetNodes()
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
 
 	// Connect to the chosen non-leader node
 	nonLeaderURL := fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), nonLeaderNode)
-	e.conn, err = ctrl.Connect(nonLeaderURL)
+	experiment.connection, err = controller.Connect(nonLeaderURL)
 	if err != nil {
 		return fmt.Errorf("failed to connect to non-leader node %s: %w", nonLeaderNode, err)
 	}
@@ -122,14 +122,14 @@ func (e *ProxyLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	return nil
 }
 
-func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
-	var wg sync.WaitGroup
+func (experiment *ProxyLatency) Run(ctx context.Context, publishers int, metricsRecorder *metrics.Recorder) (metrics.Summary, error) {
+	var waitGroup sync.WaitGroup
 
 	// Listen for amqp.Blocking alarms on the connection with the non-leader node.
 	// These alarms (memory/disk pressure) are logged to detect conditions that
 	// invalidate the measurements
 	// => https://www.rabbitmq.com/docs/connection-blocked
-	blockings := e.conn.NotifyBlocked(make(chan amqp.Blocking))
+	blockings := experiment.connection.NotifyBlocked(make(chan amqp.Blocking))
 
 	go func() {
 		var blockStart time.Time
@@ -148,37 +148,37 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 	// Consumers are started to drain the queue immediately.
 	// This prevents the queue from building up back pressure,
 	// isolating the latency measurement to Raft consensus + proxy overhead (and not queue depth).
-	if e.config.Consumers > 0 {
-		log.Printf("Starting %d consumers...", e.config.Consumers)
-		for i := 0; i < e.config.Consumers; i++ {
-			wg.Add(1)
+	if experiment.config.Consumers > 0 {
+		log.Printf("Starting %d consumers...", experiment.config.Consumers)
+		for i := 0; i < experiment.config.Consumers; i++ {
+			waitGroup.Add(1)
 			go func() {
-				defer wg.Done()
+				defer waitGroup.Done()
 
-				ch, err := e.conn.Channel()
+				amqpChannel, err := experiment.connection.Channel()
 				if err != nil {
 					log.Printf("Consumer failed to create channel: %v", err)
 					return
 				}
-				defer ch.Close()
+				defer amqpChannel.Close()
 
 				// Set QoS for the consumer channel to prefetch 50 messages
 				// Consumers will receive up to 50 unacknowledged messages at a time
 				// => Prevents flooding the consumer with too many messages
-				if err := ch.Qos(50, 0, false); err != nil {
+				if err := amqpChannel.Qos(50, 0, false); err != nil {
 					log.Printf("Consumer failed to set QoS: %v", err)
 					return
 				}
 
 				// Start consuming messages
-				msgs, err := ch.Consume(
-					e.config.QueueName, // queue
-					"",                 // consumer - unique consumer identifier
-					false,              // auto-ack - consumer must ack msgs
-					false,              // exclusive - not the only consumer for this queue
-					false,              // no-local - allow consuming msgs from the same connection
-					false,              // no-wait - wait for rmq confirmation that consumer is registered
-					nil,                // optional args
+				messages, err := amqpChannel.Consume(
+					experiment.config.QueueName, // queue
+					"",                   // consumer - unique consumer identifier
+					false,                // auto-ack - consumer must ack msgs
+					false,                // exclusive - not the only consumer for this queue
+					false,                // no-local - allow consuming msgs from the same connection
+					false,                // no-wait - wait for rmq confirmation that consumer is registered
+					nil,                  // optional args
 				)
 				if err != nil {
 					log.Printf("Consumer failed to start consuming: %v", err)
@@ -190,11 +190,11 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 					select {
 					case <-ctx.Done():
 						return
-					case d, ok := <-msgs:
+					case delivery, ok := <-messages:
 						if !ok {
 							return
 						}
-						d.Ack(false)
+						delivery.Ack(false)
 					}
 				}
 			}()
@@ -205,20 +205,20 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 	// Publishers publish synchronously and wait for an ACK for every message.
 	log.Printf("Starting %d publishers...", publishers)
 	for i := 0; i < publishers; i++ {
-		wg.Add(1)
+		waitGroup.Add(1)
 		go func(publisherID int) {
-			defer wg.Done()
+			defer waitGroup.Done()
 
 			// Local RNG to avoid global mutex contention
 			// => https://go.dev/blog/randv2
-			rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
+			randomGenerator := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
 
-			ch, err := e.conn.Channel()
+			amqpChannel, err := experiment.connection.Channel()
 			if err != nil {
 				log.Printf("Publisher failed to create channel: %v", err)
 				return
 			}
-			defer ch.Close()
+			defer amqpChannel.Close()
 
 			// Enable Publisher Confirms on this channel
 			// RMQ sends an ack for every published message once it is
@@ -226,7 +226,7 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 			// Since we're connected to a non-leader, the message must first
 			// be forwarded to the leader, adding extra latency that we're
 			// measuring in this experiment
-			if err := ch.Confirm(false); err != nil {
+			if err := amqpChannel.Confirm(false); err != nil {
 				log.Printf("Publisher failed to enable confirms: %v", err)
 				return
 			}
@@ -235,7 +235,7 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 			// Buffer size 1: Publisher can't send another message until the previous one
 			// is confirmed by rmq
 			// => Message throughput is effectively throttled by the Raft consensus + proxy latency
-			confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+			confirmations := amqpChannel.NotifyPublish(make(chan amqp.Confirmation, 1))
 
 			// Local batch for latency recording
 			const batchSize = 100
@@ -246,21 +246,21 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 				case <-ctx.Done():
 					// Flush remaining latencies
 					if len(latencyBatch) > 0 {
-						rec.RecordLatencyBatch(latencyBatch)
+						metricsRecorder.RecordLatencyBatch(latencyBatch)
 					}
 					return
 				default:
-					payload := e.payloads[rng.IntN(len(e.payloads))]
+					payload := experiment.payloads[randomGenerator.IntN(len(experiment.payloads))]
 
 					// Start Timer
 					start := time.Now()
 
 					// Publish the message
-					err := ch.PublishWithContext(ctx,
-						"",                 // exchange - default: route to queue with name equal to routing key
-						e.config.QueueName, // routing key (queue name)
-						false,              // mandatory - unroutable messages are dropped
-						false,              // immediate - no immediate delivery
+					err := amqpChannel.PublishWithContext(ctx,
+						"",                   // exchange - default: route to queue with name equal to routing key
+						experiment.config.QueueName, // routing key (queue name)
+						false,                // mandatory - unroutable messages are dropped
+						false,                // immediate - no immediate delivery
 						amqp.Publishing{
 							ContentType: "text/plain",
 							Body:        payload,
@@ -270,12 +270,12 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 					if err != nil {
 						if err == amqp.ErrClosed {
 							if len(latencyBatch) > 0 {
-								rec.RecordLatencyBatch(latencyBatch)
+								metricsRecorder.RecordLatencyBatch(latencyBatch)
 							}
 							return
 						}
 						// Backoff on error
-						rec.RecordError()
+						metricsRecorder.RecordError()
 						time.Sleep(50 * time.Millisecond)
 						continue
 					}
@@ -285,27 +285,27 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 					select {
 					case <-ctx.Done():
 						return
-					case conf := <-confirms:
-						if conf.Ack {
+					case confirmation := <-confirmations:
+						if confirmation.Ack {
 							// Record the full round-trip time (includes proxy overhead)
 							latencyBatch = append(latencyBatch, time.Since(start).Microseconds())
 							if len(latencyBatch) >= batchSize {
-								rec.RecordLatencyBatch(latencyBatch)
+								metricsRecorder.RecordLatencyBatch(latencyBatch)
 								latencyBatch = latencyBatch[:0]
 							}
 						} else {
 							// Nack or error
-							rec.RecordError()
+							metricsRecorder.RecordError()
 						}
 
 					// Handle cases where rmq is overloaded and doesn't respond in time
 					// This allows us to capture latency spikes without erroring out
 					case <-time.After(30 * time.Second):
 						log.Printf("Publisher timed out waiting for confirm")
-						rec.RecordError()
+						metricsRecorder.RecordError()
 
 						// Our last resort: backoff for 1-3 seconds before trying again
-						time.Sleep(time.Duration(1000+rng.IntN(2000)) * time.Millisecond)
+						time.Sleep(time.Duration(1000+randomGenerator.IntN(2000)) * time.Millisecond)
 					}
 				}
 			}
@@ -313,13 +313,13 @@ func (e *ProxyLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 	}
 
 	// Wait for the go context to be canceled and all coroutines to exit gracefully
-	wg.Wait()
-	return rec.GetSummary(), nil
+	waitGroup.Wait()
+	return metricsRecorder.GetSummary(), nil
 }
 
-func (e *ProxyLatency) Teardown() error {
-	if e.conn != nil {
-		return e.conn.Close()
+func (experiment *ProxyLatency) Teardown() error {
+	if experiment.connection != nil {
+		return experiment.connection.Close()
 	}
 	return nil
 }

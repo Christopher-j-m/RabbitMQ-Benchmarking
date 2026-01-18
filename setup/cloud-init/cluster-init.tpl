@@ -3,17 +3,49 @@ package_update: true
 package_upgrade: true
 
 packages:
-  - erlang-nox
-  - rabbitmq-server
-  - prometheus
-  - grafana
   - curl
-  - jq
   - iotop
   - ifstat
   - xfsprogs
+  - gnupg
+  - apt-transport-https
 
 runcmd:
+  # Install RabbitMQ 4.2.2 and Erlang
+  - |
+    echo "[$(date)] Starting RabbitMQ 4.2.2 installation..."
+
+    # Import the official Team RabbitMQ signing key
+    curl -1sLf "https://keys.openpgp.org/vks/v1/by-fingerprint/0A9AF2115F4687BD29803A206B73A36E6026DFCA" | gpg --dearmor | tee /usr/share/keyrings/com.rabbitmq.team.gpg > /dev/null
+
+    # Add apt repositories maintained by Team RabbitMQ
+    cat > /etc/apt/sources.list.d/rabbitmq.list <<EOF
+    deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb1.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+    deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb2.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+    deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb1.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+    deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb2.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+    EOF
+
+    # Update package index
+    apt-get update -y
+
+    # Install Erlang and RabbitMQ 4.2.2
+    apt-get install -y erlang-base \
+                        erlang-asn1 erlang-crypto erlang-eldap erlang-ftp erlang-inets \
+                        erlang-mnesia erlang-os-mon erlang-parsetools erlang-public-key \
+                        erlang-runtime-tools erlang-snmp erlang-ssl \
+                        erlang-syntax-tools erlang-tftp erlang-tools erlang-xmerl
+
+    apt-get install -y rabbitmq-server=4.2.2-1
+
+    # Pin the rmq version to prevent automatical upgrades
+    apt-mark hold rabbitmq-server
+
+    echo "[$(date)] RabbitMQ 4.2.2 installed"
+
+    # Verify installation
+    rabbitmqctl version || echo "[$(date)] WARNING: RabbitMQ service not fully started yet"
+
   # Mount Premium SSD v2 data disk at /var/lib/rabbitmq before RabbitMQ starts
   - |
     echo "[$(date)] Setting up Premium SSD v2 data disk for RabbitMQ..."
@@ -160,9 +192,8 @@ runcmd:
     sudo rabbitmqctl start_app
     SCRIPT_EOF
 
-  # Enable management and Prometheus plugins for monitoring
+  # Enable management plugin for monitoring
   - 'rabbitmq-plugins enable rabbitmq_management'
-  - 'rabbitmq-plugins enable rabbitmq_prometheus'
   
   # Restart RabbitMQ with all plugins enabled
   - 'systemctl restart rabbitmq-server'
@@ -190,92 +221,3 @@ runcmd:
   - 'rabbitmqctl add_user ${rabbitmq_username} ${rabbitmq_password}'
   - 'rabbitmqctl set_user_tags ${rabbitmq_username} administrator'
   - 'rabbitmqctl set_permissions -p / ${rabbitmq_username} ".*" ".*" ".*"'
-  
-  # Verify Prometheus plugin is working
-  - |
-    echo "[$(date)] Verifying RabbitMQ Prometheus endpoint..."
-    for i in {1..10}; do
-      if curl -s http://localhost:15692/metrics > /dev/null; then
-        echo "[$(date)] RabbitMQ Prometheus endpoint is responding"
-        break
-      fi
-      echo "[$(date)] Waiting for Prometheus endpoint... ($i/10)"
-      sleep 3
-    done
-  
-  # Configure Prometheus to scrape RabbitMQ metrics
-  - |
-    cat <<'EOF' >/etc/prometheus/prometheus.yml
-    global:
-      scrape_interval: 15s
-      evaluation_interval: 15s
-    
-    scrape_configs:
-      - job_name: 'prometheus'
-        static_configs:
-          - targets: ['localhost:9090']
-      
-      - job_name: 'rabbitmq'
-        static_configs:
-          - targets: ['localhost:15692']
-    EOF
-  
-  # Restart Prometheus
-  - 'systemctl restart prometheus'
-  - 'systemctl enable prometheus'
-  
-  # Wait for Prometheus to be ready
-  - |
-    echo "[$(date)] Waiting for Prometheus to be ready..."
-    for i in {1..20}; do
-      if curl -s http://localhost:9090/-/ready > /dev/null; then
-        echo "[$(date)] Prometheus is ready"
-        break
-      fi
-      echo "[$(date)] Waiting for Prometheus... ($i/20)"
-      sleep 2
-    done
-  
-  # Configure Grafana
-  - 'systemctl start grafana-server'
-  - 'systemctl enable grafana-server'
-  
-  # Wait for Grafana to start and be ready
-  - |
-    echo "[$(date)] Waiting for Grafana to be ready..."
-    for i in {1..30}; do
-      if curl -s http://localhost:3000/api/health > /dev/null 2>&1; then
-        echo "[$(date)] Grafana is ready"
-        break
-      fi
-      echo "[$(date)] Waiting for Grafana... ($i/30)"
-      sleep 2
-    done
-  
-  # Add Prometheus as Grafana datasource
-  - |
-    echo "[$(date)] Adding Prometheus datasource to Grafana..."
-    curl -X POST -H "Content-Type: application/json" \
-      -u admin:admin \
-      -d '{"name":"Prometheus","type":"prometheus","url":"http://localhost:9090","access":"proxy","isDefault":true}' \
-      http://localhost:3000/api/datasources || echo "[$(date)] Failed to add datasource (may already exist)"
-  
-  # Download and import RabbitMQ Grafana dashboard. Source:
-  # Source: https://grafana.com/grafana/dashboards/10991-rabbitmq-overview/
-  - |
-    echo "[$(date)] Importing RabbitMQ Overview dashboard (10991)..."
-    curl -s https://grafana.com/api/dashboards/10991/revisions/1/download -o /tmp/rabbitmq-dashboard-10991.json
-    if [ -f /tmp/rabbitmq-dashboard-10991.json ]; then
-      jq -n --slurpfile dashboard /tmp/rabbitmq-dashboard-10991.json \
-        '{dashboard: $dashboard[0], overwrite: true, inputs: [{name: "DS_PROMETHEUS", type: "datasource", pluginId: "prometheus", value: "Prometheus"}]}' \
-        > /tmp/dashboard-import-10991.json
-      
-      curl -X POST -H "Content-Type: application/json" \
-        -u admin:admin \
-        -d @/tmp/dashboard-import-10991.json \
-        http://localhost:3000/api/dashboards/import || echo "[$(date)] Failed to import dashboard 10991"
-    else
-      echo "[$(date)] Failed to download dashboard"
-    fi
-  
-  - 'echo "[$(date)] Monitoring setup complete"'

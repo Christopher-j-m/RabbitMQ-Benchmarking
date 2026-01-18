@@ -21,9 +21,9 @@ import (
 
 // Command-line parameters
 var (
-	mgmtURL               string
-	rmqUser               string
-	rmqPassword           string
+	managementURL         string
+	rabbitMQUser          string
+	rabbitMQPassword      string
 	queueName             string
 	quorumSize            int
 	msgSize               int
@@ -45,9 +45,9 @@ func main() {
 	}
 
 	// CLI params and their default values
-	rootCmd.Flags().StringVar(&mgmtURL, "mgmt-url", "", "RabbitMQ Management URL (Required)")
-	rootCmd.Flags().StringVar(&rmqUser, "rmq-user", "", "RabbitMQ User (Required)")
-	rootCmd.Flags().StringVar(&rmqPassword, "rmq-password", "", "RabbitMQ Password (Required)")
+	rootCmd.Flags().StringVar(&managementURL, "mgmt-url", "", "RabbitMQ Management URL (Required)")
+	rootCmd.Flags().StringVar(&rabbitMQUser, "rmq-user", "", "RabbitMQ User (Required)")
+	rootCmd.Flags().StringVar(&rabbitMQPassword, "rmq-password", "", "RabbitMQ Password (Required)")
 	rootCmd.Flags().StringVar(&queueName, "queue-name", "benchmark-queue", "Queue Name")
 	rootCmd.Flags().IntVar(&quorumSize, "quorum-size", 3, "Quorum Queue Group Size")
 	rootCmd.Flags().IntVar(&msgSize, "msg-size", 1024, "Message Size in Bytes")
@@ -84,14 +84,14 @@ func fatalf(format string, v ...interface{}) {
 
 // Log a message to both the log file and stdout
 func logAndPrint(format string, v ...interface{}) {
-	msg := fmt.Sprintf(format, v...)
-	log.Print(msg)
-	fmt.Println(msg)
+	message := fmt.Sprintf(format, v...)
+	log.Print(message)
+	fmt.Println(message)
 }
 
 // Build the AMQP connection string from the existing parameters (management URL and credentials)
-func deriveAMQPURL(mgmtURL, user, password string) (string, error) {
-	parsed, err := url.Parse(mgmtURL)
+func deriveAMQPURL(managementURL, user, password string) (string, error) {
+	parsed, err := url.Parse(managementURL)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse management URL: %w", err)
 	}
@@ -111,18 +111,18 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	// Log file named in the following format: benchmark_<experiment>_<timestamp>.log
 	timestamp := time.Now().Format("20060102-150405")
 	logFile := filepath.Join(logsDir, fmt.Sprintf("benchmark_%s_%s.log", experimentName, timestamp))
-	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	logFileHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 
 	if err != nil {
 		fmt.Printf("Failed to open log file: %v\n", err)
 		os.Exit(1)
 	}
-	defer f.Close()
+	defer logFileHandle.Close()
 
 	// Log from now on per default only to log file to avoid interfering with progress bar
-	log.SetOutput(f)
+	log.SetOutput(logFileHandle)
 
-	amqpURL, err := deriveAMQPURL(mgmtURL, rmqUser, rmqPassword)
+	rabbitMQAMQPURL, err := deriveAMQPURL(managementURL, rabbitMQUser, rabbitMQPassword)
 	if err != nil {
 		fatalf("Failed to construct AMQP URL from the given parameters: %v", err)
 	}
@@ -155,8 +155,8 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	logAndPrint("---------------------------------------------------")
 	logAndPrint("Benchmark Parameters:")
 	logAndPrint("Experiment: %s", experimentName)
-	logAndPrint("Mgmt URL: %s", mgmtURL)
-	logAndPrint("Rmq User: %s", rmqUser)
+	logAndPrint("Mgmt URL: %s", managementURL)
+	logAndPrint("Rmq User: %s", rabbitMQUser)
 	logAndPrint("Queue Name: %s", queueName)
 	logAndPrint("Queue Count: %d", queueCount)
 	logAndPrint("Quorum Size: %d", quorumSize)
@@ -172,19 +172,19 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	logAndPrint("---------------------------------------------------")
 
 	// Controller component contains common functionality for RabbitMQ node & Management API interactions
-	ctrl := rmq.NewController(mgmtURL, rmqUser, rmqPassword)
+	rabbitMQController := rmq.NewController(managementURL, rabbitMQUser, rabbitMQPassword)
 
 	// Create specified experiment & pass parameters
-	exp, err := experiments.GetExperiment(experimentName)
+	experiment, err := experiments.GetExperiment(experimentName)
 	if err != nil {
 		fatalf("Failed to select the specified experiment: %v", err)
 	}
 
 	config := experiments.Config{
-		RabbitURL:             amqpURL,
-		ManagementURL:         mgmtURL,
-		User:                  rmqUser,
-		Password:              rmqPassword,
+		RabbitURL:             rabbitMQAMQPURL,
+		ManagementURL:         managementURL,
+		User:                  rabbitMQUser,
+		Password:              rabbitMQPassword,
 		QueueName:             queueName,
 		QuorumSize:            quorumSize,
 		MsgSize:               msgSize,
@@ -196,14 +196,14 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		QueueOverflowStrategy: queueOverflowStrategy,
 		QueueCount:            queueCount,
 	}
-	if err := exp.Setup(config, ctrl); err != nil {
+	if err := experiment.Setup(config, rabbitMQController); err != nil {
 		fatalf("Failed to configure the experiment: %v", err)
 	}
-	defer exp.Teardown()
+	defer experiment.Teardown()
 
 	// Create the Metrics Recorder & start recording
 	// TODO: Make custom Recorders defineable per experiment (to keep being extensible)
-	rec, err := metrics.NewRecorder(experimentName, quorumSize, warmup)
+	metricsRecorder, err := metrics.NewRecorder(experimentName, quorumSize, warmup)
 	if err != nil {
 		fatalf("Failed to create recorder: %v", err)
 	}
@@ -212,8 +212,8 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	benchmarkConfig := metrics.BenchmarkConfig{
 		Experiment:            experimentName,
 		StartTime:             time.Now().Format(time.RFC3339),
-		ManagementURL:         mgmtURL,
-		User:                  rmqUser,
+		ManagementURL:         managementURL,
+		User:                  rabbitMQUser,
 		QueueName:             queueName,
 		QueueCount:            queueCount,
 		QuorumSize:            quorumSize,
@@ -225,12 +225,12 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		QueueMaxLength:        queueMaxLength,
 		QueueOverflowStrategy: queueOverflowStrategy,
 	}
-	if err := rec.WriteConfig(benchmarkConfig); err != nil {
+	if err := metricsRecorder.WriteConfig(benchmarkConfig); err != nil {
 		log.Printf("Failed to write config file: %v", err)
 	}
 
-	rec.Start()
-	defer rec.Stop()
+	metricsRecorder.Start()
+	defer metricsRecorder.Stop()
 
 	// Context controls the duration of the Run method of the experiment
 	// The total runtime of the experiment is duration + warmup
@@ -239,16 +239,16 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	defer cancel()
 
 	// Graceful shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt)
+	signalChannel := make(chan os.Signal, 1)
+	signal.Notify(signalChannel, os.Interrupt)
 	go func() {
-		<-sigChan
+		<-signalChannel
 		fmt.Fprintln(os.Stderr, "\n[INTERRUPT] Gracefully cancelling benchmark...")
 		log.Println("[INTERRUPT] Gracefully cancelling benchmark...")
 		cancel()
 
 		// Force exit if another interrupt is received
-		<-sigChan
+		<-signalChannel
 		fmt.Fprintln(os.Stderr, "\n[INTERRUPT] Forcing exit...")
 		log.Println("[INTERRUPT] Forcing exit...")
 		// Restore cursor visibility
@@ -260,22 +260,22 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	log.Printf("Running experiment for %d seconds (Warmup: %ds, Measure: %ds)...", totalDuration, warmup, duration)
 
 	// Start progress bar
-	mon := monitor.NewMonitor()
-	mon.ConfigureDisplay(totalDuration, warmup)
-	mon.Start()
-	mon.StartDisplay()
-	defer mon.Stop()
+	progressMonitor := monitor.NewMonitor()
+	progressMonitor.ConfigureDisplay(totalDuration, warmup)
+	progressMonitor.Start()
+	progressMonitor.StartDisplay()
+	defer progressMonitor.Stop()
 
 	// Handle cleanup display when context is cancelled
 	go func() {
 		<-ctx.Done()
-		mon.DisplayCleanup()
+		progressMonitor.DisplayCleanup()
 	}()
 
-	summary, err := exp.Run(ctx, publishers, rec)
+	summary, err := experiment.Run(ctx, publishers, metricsRecorder)
 
 	// Finish display
-	mon.FinishDisplay()
+	progressMonitor.FinishDisplay()
 	fmt.Println("---------------------------------------------------")
 
 	if err != nil {
@@ -286,6 +286,6 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	formattedSummary, _ := json.MarshalIndent(summary, "", "  ")
 	fmt.Println(string(formattedSummary))
 	logAndPrint("---------------------------------------------------")
-	logAndPrint("Results saved to: %s", rec.GetResultsPath())
+	logAndPrint("Results saved to: %s", metricsRecorder.GetResultsPath())
 	logAndPrint("Log file saved to: %s", logFile)
 }

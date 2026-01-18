@@ -27,13 +27,12 @@ cd setup/terraform && nano variables.tf
 ```
 
 #### Provisioning
-***TODO: Move Terraform to azure subdir***
 ```
 terraform init
 terraform apply
 ```
 #### Verify RabbitMQ Cluster Status
-After the provisioning of the Cloud resources, cloud init is used to install dependencies and monitoring tools, such as the RabbitMQ Management Plugin and Prometheus+Grafana and automatically form the RabbitMQ cluster among all cluster nodes. Before proceeding with step ***TODO*** make sure to verify via the RabbitMQ Management Plugin that the cluster formating finished sucessfully. This can either be done via the [Management Plugin UI](https://www.rabbitmq.com/docs/management#usage-ui) or on each node with
+After the provisioning of the Cloud resources, cloud-init is used to install dependencies and monitoring tools, such as the RabbitMQ Management Plugin and automatically form the RabbitMQ cluster among all cluster nodes. Before proceeding with step ***TODO*** make sure to verify via the RabbitMQ Management Plugin that the cluster formating finished sucessfully. This can either be done via the [Management Plugin UI](https://www.rabbitmq.com/docs/management#usage-ui) or on each node with
 ```
 rabbitmqctl cluster_status
 ```
@@ -72,3 +71,5 @@ Measures the end-to-end latency in rmq quorum queues under heavy load conditions
 ./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="iMGpvjPOvRZ75QoZ" --experiment=stress-latency --publishers=160 --queue-length=1000 --warmup=0 --duration=1800 --queue-count=4
 ```
 
+## Adding new Experiments
+All experiments need to implement the experiment interface defined in `/experiments/interface.go` and have to be registered in `/experiments/registry.go`. Afterwards new experiments can be run with the Benchmark CLI

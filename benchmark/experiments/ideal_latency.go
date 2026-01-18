@@ -2,7 +2,7 @@
 //
 // Measures the latency cost imposed by the Raft consensus in rmq quorum queues under ideal conditions
 // with a fixed a fixed 1-publisher/1-consumer setup connected directly to the queue leader node.
-// => Inject timestamp into message headers for end-to-end latency calculation.
+// Inject timestamp into message headers for end-to-end latency calculation.
 //
 // Publisher: Send messages synchronously, waiting for a ack before sending the next one. 
 // Consumer: Extracts 'x-sent-at' headers for latency calculation.
@@ -25,22 +25,22 @@ import (
 )
 
 type IdealLatency struct {
-	config    Config
-	ctrl      *rmq.Controller
-	leaderURL string
-	conns     []*amqp.Connection
-	payloads  [][]byte
+	config      Config
+	controller  *rmq.Controller
+	leaderURL   string
+	connections []*amqp.Connection
+	payloads    [][]byte
 }
 
-func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
-	e.config = config
-	e.ctrl = ctrl
+func (experiment *IdealLatency) Setup(config Config, controller *rmq.Controller) error {
+	experiment.config = config
+	experiment.controller = controller
 
 	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
 	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
-	e.payloads = make([][]byte, 1000)
-	for i := range e.payloads {
+	experiment.payloads = make([][]byte, 1000)
+	for i := range experiment.payloads {
 		size := 1024 + rand.IntN(4096)
 		text := faker.Paragraph()
 		b := make([]byte, size)
@@ -50,34 +50,34 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 				b[j] = byte(rand.IntN(256))
 			}
 		}
-		e.payloads[i] = b
+		experiment.payloads[i] = b
 	}
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
 	// Connect to cluster
-	conn, err := ctrl.Connect(config.RabbitURL)
+	connection, err := controller.Connect(config.RabbitURL)
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
+	defer connection.Close()
 
 	// Delete existing queues with the same name as the ones
 	// that will be created during this experiment
-	chDelete, err := conn.Channel()
+	channelDelete, err := connection.Channel()
 	if err != nil {
 		return fmt.Errorf("failed to open channel for deletion: %w", err)
 	}
 
 	log.Printf("Deleting existing queue %s...", config.QueueName)
-	_, _ = chDelete.QueueDelete(config.QueueName, false, false, false)
-	chDelete.Close()
+	_, _ = channelDelete.QueueDelete(config.QueueName, false, false, false)
+	channelDelete.Close()
 
 	// Create a channel for queue declaration
-	ch, err := conn.Channel()
+	amqpChannel, err := connection.Channel()
 	if err != nil {
 		return err
 	}
-	defer ch.Close()
+	defer amqpChannel.Close()
 
 	// Configure the queue as a quorum queue with the specified initial group size.
 	args := amqp.Table{
@@ -86,7 +86,7 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 
 	// Create the quorum queue
-	_, err = ch.QueueDeclare(
+	_, err = amqpChannel.QueueDeclare(
 		config.QueueName, // name
 		true,             // durable
 		false,            // delete when unused
@@ -99,25 +99,25 @@ func (e *IdealLatency) Setup(config Config, ctrl *rmq.Controller) error {
 	}
 
 	// Find the leader node for the created quorum queue
-	leaderNode, err := ctrl.GetQueueLeaderNode("/", config.QueueName)
+	leaderNode, err := controller.GetQueueLeaderNode("/", config.QueueName)
 	if err != nil {
 		return err
 	}
 	log.Printf("Queue leader is on node: %s", leaderNode)
 
 	// Store leader URL for publisher/consumer connections
-	e.leaderURL = fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), leaderNode)
-	e.conns = make([]*amqp.Connection, 0)
+	experiment.leaderURL = fmt.Sprintf("amqp://%s:%s@%s:5672/", url.QueryEscape(config.User), url.QueryEscape(config.Password), leaderNode)
+	experiment.connections = make([]*amqp.Connection, 0)
 
 	return nil
 }
 
-func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Recorder) (metrics.Summary, error) {
-	var wg sync.WaitGroup
+func (experiment *IdealLatency) Run(ctx context.Context, publishers int, metricsRecorder *metrics.Recorder) (metrics.Summary, error) {
+	var waitGroup sync.WaitGroup
 
 	// Monitor cnnection for blocked notifications
-	monitorConnection := func(conn *amqp.Connection) {
-		blockings := conn.NotifyBlocked(make(chan amqp.Blocking))
+	monitorConnection := func(connection *amqp.Connection) {
+		blockings := connection.NotifyBlocked(make(chan amqp.Blocking))
 		go func(c <-chan amqp.Blocking) {
 			var blockStart time.Time
 			for b := range c {
@@ -133,19 +133,19 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 	}
 
 	// Create Consumer Connection
-	consumerConn, err := e.ctrl.Connect(e.leaderURL)
+	consumerConn, err := experiment.controller.Connect(experiment.leaderURL)
 	if err != nil {
 		return metrics.Summary{}, fmt.Errorf("consumer failed to create connection: %w", err)
 	}
-	e.conns = append(e.conns, consumerConn)
+	experiment.connections = append(experiment.connections, consumerConn)
 	monitorConnection(consumerConn)
 
 	// Create Publisher Connection
-	publisherConn, err := e.ctrl.Connect(e.leaderURL)
+	publisherConn, err := experiment.controller.Connect(experiment.leaderURL)
 	if err != nil {
 		return metrics.Summary{}, fmt.Errorf("publisher failed to create connection: %w", err)
 	}
-	e.conns = append(e.conns, publisherConn)
+	experiment.connections = append(experiment.connections, publisherConn)
 	monitorConnection(publisherConn)
 
 	// CONSUMER
@@ -153,20 +153,20 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 	// It extracts the timestamp from the message header and calculates the latency.
 	log.Printf("Starting 1 consumer (fixed for Ideal Latency)...")
 
-	wg.Add(1)
-	go func(conn *amqp.Connection, rec *metrics.Recorder) {
-		defer wg.Done()
+	waitGroup.Add(1)
+	go func(connection *amqp.Connection, metricsRecorder *metrics.Recorder) {
+		defer waitGroup.Done()
 
-		ch, err := conn.Channel()
+		amqpChannel, err := connection.Channel()
 		if err != nil {
 			log.Printf("Consumer failed to create channel: %v", err)
 			return
 		}
-		defer ch.Close()
+		defer amqpChannel.Close()
 
 		// Start consuming messages
-		msgs, err := ch.Consume(
-			e.config.QueueName, // queue
+		messages, err := amqpChannel.Consume(
+			experiment.config.QueueName, // queue
 			"",                 // consumer - unique consumer identifier
 			false,              // auto-ack - consumer must ack msgs
 			false,              // exclusive - not the only consumer for this queue
@@ -189,60 +189,60 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 			case <-ctx.Done():
 				// Flush remaining latencies
 				if len(latencyBatch) > 0 {
-					rec.RecordLatencyBatch(latencyBatch)
+					metricsRecorder.RecordLatencyBatch(latencyBatch)
 				}
 				return
-			case d, ok := <-msgs:
+			case delivery, ok := <-messages:
 				if !ok {
 					if len(latencyBatch) > 0 {
-						rec.RecordLatencyBatch(latencyBatch)
+						metricsRecorder.RecordLatencyBatch(latencyBatch)
 					}
 					return
 				}
 
 				// Extract timestamp from header and calculate end-to-end latency
-				if sentAt, ok := d.Headers["x-sent-at"]; ok {
+				if sentAt, ok := delivery.Headers["x-sent-at"]; ok {
 					if sentTimestamp, ok := sentAt.(int64); ok {
 						latencyNs := time.Now().UnixNano() - sentTimestamp
 						latencyUs := latencyNs / 1000 // Convert to microseconds
 						latencyBatch = append(latencyBatch, latencyUs)
 						if len(latencyBatch) >= batchSize {
-							rec.RecordLatencyBatch(latencyBatch)
+							metricsRecorder.RecordLatencyBatch(latencyBatch)
 							latencyBatch = latencyBatch[:0]
 						}
 					}
 				}
 
-				d.Ack(false)
+				delivery.Ack(false)
 			}
 		}
-	}(consumerConn, rec)
+	}(consumerConn, metricsRecorder)
 
 	// PUBLISHER
 	// Publishes and waits for a ack for every message
 	log.Printf("Starting 1 publisher (fixed for Ideal Latency)...")
 
-	wg.Add(1)
-	go func(conn *amqp.Connection, publisherID int) {
-		defer wg.Done()
+	waitGroup.Add(1)
+	go func(connection *amqp.Connection, publisherID int) {
+		defer waitGroup.Done()
 
 		// Local RNG to avoid global mutex contention
 		// => https://go.dev/blog/randv2
-		rng := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
+		randomGenerator := rand.New(rand.NewPCG(uint64(publisherID), uint64(time.Now().UnixNano())))
 
-		ch, err := conn.Channel()
+		amqpChannel, err := connection.Channel()
 		if err != nil {
 			log.Printf("Publisher failed to create channel: %v", err)
 			return
 		}
-		defer ch.Close()
+		defer amqpChannel.Close()
 
 		// Enable Publisher Confirms on this channel
 		// RMQ sends an ack for every published message once it is
 		// replicated to all the other nodes (quorum)
 		// => Mandatory for measuring the Raft replication latency,
 		// ... which is the main objective of this experiment
-		if err := ch.Confirm(false); err != nil {
+		if err := amqpChannel.Confirm(false); err != nil {
 			log.Printf("Publisher failed to enable confirms: %v", err)
 			return
 		}
@@ -251,19 +251,19 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 		// Buffer size 1: Publisher can't send another message until the previous one
 		// is confirmed by rmq
 		// => Message throughput is effectively throttled by the Raft consensus latency
-		confirms := ch.NotifyPublish(make(chan amqp.Confirmation, 1))
+		confirmations := amqpChannel.NotifyPublish(make(chan amqp.Confirmation, 1))
 
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			default:
-				payload := e.payloads[rng.IntN(len(e.payloads))]
+				payload := experiment.payloads[randomGenerator.IntN(len(experiment.payloads))]
 
 				// Publish the message with timestamp header for end-to-end latency calculation
-				err := ch.PublishWithContext(ctx,
+				err := amqpChannel.PublishWithContext(ctx,
 					"",                 // exchange - default: route to queue with name equal to routing key
-					e.config.QueueName, // routing key (queue name)
+					experiment.config.QueueName, // routing key (queue name)
 					false,              // mandatory - unroutable messages are dropped
 					false,              // immediate - no immediate delivery
 					amqp.Publishing{
@@ -278,7 +278,7 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 						return
 					}
 					// Backoff on error
-					rec.RecordError()
+					metricsRecorder.RecordError()
 					time.Sleep(50 * time.Millisecond)
 					continue
 				}
@@ -289,34 +289,34 @@ func (e *IdealLatency) Run(ctx context.Context, publishers int, rec *metrics.Rec
 				select {
 				case <-ctx.Done():
 					return
-				case conf := <-confirms:
-					if !conf.Ack {
+				case confirmation := <-confirmations:
+					if !confirmation.Ack {
 						// Nack or error
-						rec.RecordError()
+						metricsRecorder.RecordError()
 					}
 
 				// Handle cases where rmq is overloaded and doesn't respond in time
 				// This allows us to capture latency spikes without erroring out
 				case <-time.After(30 * time.Second):
 					log.Printf("Publisher timed out waiting for confirm")
-					rec.RecordError()
+					metricsRecorder.RecordError()
 
 					// Our last resort: backoff for 1-3 seconds before trying again
-					time.Sleep(time.Duration(1000+rng.IntN(2000)) * time.Millisecond)
+					time.Sleep(time.Duration(1000+randomGenerator.IntN(2000)) * time.Millisecond)
 				}
 			}
 		}
 	}(publisherConn, 0)
 
 	// Wait for the go context to be canceled and all coroutines to exit gracefully
-	wg.Wait()
-	return rec.GetSummary(), nil
+	waitGroup.Wait()
+	return metricsRecorder.GetSummary(), nil
 }
 
-func (e *IdealLatency) Teardown() error {
-	for _, conn := range e.conns {
-		if conn != nil {
-			conn.Close()
+func (experiment *IdealLatency) Teardown() error {
+	for _, connection := range experiment.connections {
+		if connection != nil {
+			connection.Close()
 		}
 	}
 	return nil

@@ -63,7 +63,7 @@ variable "cluster_nodes" {
     cluster_name         = "rmq-benchmark-cluster"
     size                 = "Standard_D4s_v5"
     zone                 = "1"
-    admin_username       = "azureuser"
+    admin_username       = "benchmarkuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/cluster-init.tpl"
     os_disk = {
@@ -80,8 +80,8 @@ variable "cluster_nodes" {
     }
     source_image = {
       publisher = "Canonical"
-      offer     = "0001-com-ubuntu-server-jammy"
-      sku       = "22_04-lts-gen2"
+      offer     = "ubuntu-24_04-lts"
+      sku       = "server"
       version   = "latest"
     }
   }
@@ -112,7 +112,7 @@ variable "load_generators" {
     count                = 1
     name_prefix          = "rabbit-loadgen-node"
     size                 = "Standard_F32s_v2"
-    admin_username       = "azureuser"
+    admin_username       = "benchmarkuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/loadgen-node-init.tpl"
     os_disk = {
@@ -122,8 +122,8 @@ variable "load_generators" {
     }
     source_image = {
       publisher = "Canonical"
-      offer     = "0001-com-ubuntu-server-jammy"
-      sku       = "22_04-lts-gen2"
+      offer     = "ubuntu-24_04-lts"
+      sku       = "server"
       version   = "latest"
     }
   }
