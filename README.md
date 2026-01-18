@@ -1,75 +1,123 @@
 # RabbitMQ-Cluster Benchmarking CLI
 
-> Part of the module Cloud Service Benchmarking at the Technische Universität Berlin during the Winter Term 25/26
+> Part of the Cloud Service Benchmarking module at the Technische Universität Berlin during the Winter Term 25/26.
 
-## Table of Content
+## Table of Contents
+
+* [Requirements](#requirements)
+* [Setup Benchmark Environment](#setup-benchmark-environment)
+* [Benchmark Execution](#benchmark-execution)
+* [Adding New Experiments](#adding-new-experiments)
+
+---
 
 ## Requirements
-Tested on Ubuntu 22.04 & ***TODO: Updated cluster node ubuntu version***.
-- **Setup**
-    - [Terraform](https://developer.hashicorp.com/terraform/install) (1.14+)
-    - Authentication via [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli?view=azure-cli-latest)
-- **Load Generator**
-    - [Go](https://go.dev/dl/) (1.25+)
-- **Cluster Nodes**
-    - [RabbitMQ](https://www.rabbitmq.com/docs/download) (***TODO:Version***)
 
+The project has been tested on **Ubuntu 22.04** and **24.04**.
+
+| Component | Requirement |
+| --- | --- |
+| **Setup** | [Terraform](https://developer.hashicorp.com/terraform/install) (1.14+)<br>[Azure CLI](https://www.google.com/search?q=https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) |
+| **Load Generator** | [Go](https://go.dev/dl/) (1.25+) |
+| **Cluster Nodes** | [RabbitMQ](https://www.rabbitmq.com/docs/download) (v3.13+) |
+
+---
 
 ## Setup Benchmark Environment
-This repository contains a exemplary terraform setup to create a benchmark environment on Microsoft Azure, install dependencies and deploy rabbitmq via cloud-init and utility scripts to notably automate deployment of the CLI and the collection of benchmark results. While custom benchmark environments, such as other cloud providers or local machines, are expected to be supported, always make sure to stick to the configuration of the exemplary terraform setup as close as possible. In case you want to skip the Terraform setup, please proceed to ***TODO***
+
+This repository contains an exemplary Terraform setup to provision a benchmark environment on Microsoft Azure. It automates dependency installation, deploys RabbitMQ via `cloud-init` and provides utility scripts to streamline CLI deployment and result collection.
+
+While custom environments (other cloud providers or local machines) are expected to be compatible with the benchmark CLI, it is recommended to stick to the configuration of the provided Terraform setup as closely as possible. In this case, you can skip to the [benchmark execution](#benchmark-execution).
 
 ### Terraform (Microsoft Azure)
 
-#### Configuration
-Configure the benchmark environment in `variables.tf` before the actual provisioning of the environment.
-```
+#### 1. Configuration
+
+Configure the benchmark environment in `variables.tf` before provisioning.
+
+```bash
 cd setup/terraform && nano variables.tf
+
 ```
 
-#### Provisioning
-```
+#### 2. Provisioning
+
+```bash
 terraform init
 terraform apply
-```
-#### Verify RabbitMQ Cluster Status
-After the provisioning of the Cloud resources, cloud-init is used to install dependencies and monitoring tools, such as the RabbitMQ Management Plugin and automatically form the RabbitMQ cluster among all cluster nodes. Before proceeding with step ***TODO*** make sure to verify via the RabbitMQ Management Plugin that the cluster formating finished sucessfully. This can either be done via the [Management Plugin UI](https://www.rabbitmq.com/docs/management#usage-ui) or on each node with
-```
-rabbitmqctl cluster_status
+
 ```
 
-### (Optional) Automation Scripts
-The terraform setup automatically generates a `config.txt` file with informations about the newly created benchmark environment to `setup/utility`, on which the automation scripts depend on in order to extract environment informations and therefore mostly dont require parameters in order to automate repeating tasks, such as building and deploying the benchmark CLI to the load generator client via SSH. 
+#### 3. Verify RabbitMQ Cluster Status
+
+After provisioning, `cloud-init` installs dependencies, the RabbitMQ Management Plugin and automatically forms the cluster. Before proceeding, verify that the cluster has formed successfully via the [Management Plugin UI](https://www.rabbitmq.com/docs/management#usage-ui) or by running the following on any cluster node:
+
+```bash
+rabbitmqctl cluster_status
+
+```
+
+### Automation Scripts
+
+The Terraform setup generates a `config.txt` file in the `setup/utility` directory. This file contains environment metadata used by the automation scripts. These scripts allow you to perform repetitive tasks, such as building and deploying the CLI to the load generator via SSH, without manually passing any parameters. Any use of these scripts is highly optional.
+
+---
 
 ## Benchmark Execution
-### Build benchmark CLI
-The benchmark CLI can be built and copied via the automation script `deploy_benchmark.sh` or manually via 
-```
+
+### Build Benchmark CLI
+
+You can build and copy the CLI using the `deploy_benchmark.sh` utility script, or manually via:
+
+```bash
 cd benchmark && go build -o rmq-benchmark .
+
 ```
-All available configuration parameters and their default values can be listed via
-```
+
+To view all available configuration parameters and default values:
+
+```bash
 ./rmq-benchmark -h
+
 ```
 
 ### Available Experiments
-The CLI offers currently four independent eperiments that are aimed towards measuring end-to-end latency and throughput, which can be selected via `-experiment <experiment-name>`
-#### Throughput (*linear-capacity* ***TODO:Rename?***)
-Measures the throughput of a RabbitMQ cluster. Example:
-```
-./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="password" --experiment=linear-capacity --publishers=160 --queue-length=1000 --warmup=120 --duration=1800 --queue-count=4
+
+The CLI currently offers three independent experiments focused on measuring end-to-end latency and throughput. Select an experiment using the `-experiment <name>` parameter.
+
+#### 1. Throughput (*linear-capacity*)
+
+Measures the maximum throughput of the RabbitMQ cluster. **Example:**
+
+```bash
+./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="your-password" --experiment=linear-capacity --publishers=160 --queue-length=1000 --warmup=120 --duration=1800 --queue-count=4
+
 ```
 
-#### Isolated Latency (*ideal-latency*)
-Measures the Measures the latency cost imposed by the Raft consensus under ideal conditions with a fixed a fixed 1-publisher/1-consumer setup connected directly to the queue leader node. Example:
-```
-./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="password" --experiment=ideal-latency --warmup=12 --duration=1800
+#### 2. Baseline Latency (*ideal-latency*)
+
+Measures the latency cost imposed by the [Raft consensus](https://www.rabbitmq.com/docs/quorum-queues#behaviour) under ideal conditions, using a fixed 1-publisher/1-consumer setup connected directly to the queue leader node. **Example:**
+
+```bash
+./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="your-password" --experiment=ideal-latency --warmup=120 --duration=1800
+
 ```
 
-#### Latency with parallel load (*stress-latency*)
-Measures the end-to-end latency in rmq quorum queues under heavy load conditions by combining the latency measurement approach from *ideal_latency* with heavy stress generation similar to *linear_capacity*. Example:
-```
-./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="iMGpvjPOvRZ75QoZ" --experiment=stress-latency --publishers=160 --queue-length=1000 --warmup=0 --duration=1800 --queue-count=4
+#### 3. Contention Latency (stress-latency)
+
+Measures end-to-end latency in RabbitMQ Quorum Queues under heavy load. This experiment re-uses the approach of the `ideal-latency` for measuring the latency and the `linear-capacity` experiment for parallel stress generation on the cluster. **Example:**
+
+```bash
+./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="your-password" --experiment=stress-latency --publishers=160 --queue-length=1000 --warmup=120 --duration=1800 --queue-count=4
+
 ```
 
-## Adding new Experiments
-All experiments need to implement the experiment interface defined in `/experiments/interface.go` and have to be registered in `/experiments/registry.go`. Afterwards new experiments can be run with the Benchmark CLI
+---
+
+## Adding New Experiments
+
+To extend the benchmark suite with a new independent benchmark experiment:
+
+1. Implement the experiment interface defined in `/experiments/interface.go`.
+2. Register the new experiment in `/experiments/registry.go`.
+3. Rebuild the CLI to automatically make the new experiment available via the `-experiment` parameter.
