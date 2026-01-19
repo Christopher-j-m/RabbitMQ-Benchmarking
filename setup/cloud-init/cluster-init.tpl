@@ -11,6 +11,67 @@ packages:
   - apt-transport-https
 
 runcmd:
+  # Mount Premium SSD v2 data disk
+  - |
+    #!/bin/bash
+    set -e
+    echo "Setting up Premium SSD v2 data disk..."
+    
+    # Premium SSD v2 on v6-series VMs uses NVMe
+    # nvme0n1 = OS disk, nvme0n2 = data disk
+    # Source: https://learn.microsoft.com/de-de/azure/virtual-machines/nvme-overview#scsi-to-nvme
+    DEVICE="/dev/nvme0n2"
+    
+    # Wait up to 60 seconds for the NVMe data disk to appear
+    for i in $(seq 1 60); do
+      if [ -b "$DEVICE" ]; then
+        echo "Found NVMe data disk at $DEVICE"
+        break
+      fi
+      
+      if [ "$i" -eq 60 ]; then
+        echo "ERROR: Data disk $DEVICE not found after 60 seconds"
+        echo "Available devices:"
+        lsblk
+        exit 1
+      fi
+      echo "Waiting for data disk... ($i/60)"
+      sleep 1
+    done
+    
+    echo "Data disk device: $DEVICE"
+    
+    # Format disk if not already formatted with XFS
+    if ! blkid "$DEVICE" | grep -q xfs; then
+      echo "Formatting $DEVICE with XFS..."
+      mkfs.xfs -f "$DEVICE"
+    else
+      echo "Disk already formatted with XFS"
+    fi
+    
+    # Get the UUID for fstab entry
+    UUID=$(blkid -s UUID -o value "$DEVICE")
+    echo "Disk UUID: $UUID"
+    
+    if [ -z "$UUID" ]; then
+      echo "ERROR: Could not get UUID for $DEVICE"
+      exit 1
+    fi
+    
+    # Create mount
+    mkdir -p /var/lib/rabbitmq
+    
+    # Add fstab entry if not already present
+    if ! grep -q "$UUID" /etc/fstab; then
+      echo "UUID=$UUID /var/lib/rabbitmq xfs defaults,nofail 0 2" >> /etc/fstab
+      echo "Added fstab entry for data disk"
+    fi
+    
+    # Mount the disk
+    mount /var/lib/rabbitmq
+    echo "Data disk mounted at /var/lib/rabbitmq"
+    df -h /var/lib/rabbitmq
+
   # Install RabbitMQ 4.2.2 and Erlang
   - |
     echo "Starting RabbitMQ 4.2.2 installation..."
@@ -29,84 +90,24 @@ runcmd:
     # Update package index
     apt-get update -y
 
-    # Install Erlang and RabbitMQ 4.2.2
+    # Install Erlang packages
     apt-get install -y erlang-base \
                         erlang-asn1 erlang-crypto erlang-eldap erlang-ftp erlang-inets \
                         erlang-mnesia erlang-os-mon erlang-parsetools erlang-public-key \
                         erlang-runtime-tools erlang-snmp erlang-ssl \
                         erlang-syntax-tools erlang-tftp erlang-tools erlang-xmerl
 
+    # Install RabbitMQ
     apt-get install -y rabbitmq-server=4.2.2-1
 
-    # Pin the rmq version to prevent automatical upgrades
+    # Pin the rmq version to prevent automatic upgrades
     apt-mark hold rabbitmq-server
 
     echo "RabbitMQ 4.2.2 installed"
 
-    # Verify installation
-    rabbitmqctl version || echo "WARNING: RabbitMQ service not fully started yet"
-
-  # Mount Premium SSD v2 data disk at /var/lib/rabbitmq before RabbitMQ starts
-  - |
-    echo "Setting up Premium SSD v2 data disk for RabbitMQ..."
-    
-    # Wait for the data disk at LUN 10 to appear
-    DISK_PATH="/dev/disk/azure/scsi1/lun10"
-    for i in {1..60}; do
-      if [ -e "$DISK_PATH" ]; then
-        echo "Data disk found at $DISK_PATH"
-        break
-      fi
-      if [ $i -eq 60 ]; then
-        echo "ERROR: Data disk not found at $DISK_PATH after 60 seconds"
-        exit 1
-      fi
-      echo "Waiting for data disk... ($i/60)"
-      sleep 1
-    done
-    
-    # Get the actual device path
-    DEVICE=$(readlink -f "$DISK_PATH")
-    echo "Data disk device: $DEVICE"
-    
-    # Check if disk is already formatted
-    if ! blkid "$DEVICE" | grep -q xfs; then
-      echo "Formatting $DEVICE with XFS..."
-      mkfs.xfs "$DEVICE"
-    else
-      echo "Disk already formatted with XFS"
-    fi
-    
-    # Create the RabbitMQ data directory
-    mkdir -p /var/lib/rabbitmq
-    
-    # Get the UUID for fstab entry
-    UUID=$(blkid -s UUID -o value "$DEVICE")
-    echo "Disk UUID: $UUID"
-    
-    # Add fstab entry if not already present
-    # We need to use 'nofail' to avoid boot issues if anything goes wrong with the V2 SSD disk
-    if ! grep -q "$UUID" /etc/fstab; then
-      echo "UUID=$UUID /var/lib/rabbitmq xfs defaults,nofail 0 2" >> /etc/fstab
-      echo "Added fstab entry for data disk"
-    fi
-    
-    # Mount the disk
-    mount /var/lib/rabbitmq
-    echo "Data disk mounted at /var/lib/rabbitmq"
-    
-    # Set ownership for rabbitmq user
-    chown -R rabbitmq:rabbitmq /var/lib/rabbitmq 2>/dev/null || true
-    chmod 750 /var/lib/rabbitmq
-
-  # Set the shared Erlang cookie & Nodename env var
-  # Note: /var/lib/rabbitmq is now on the Premium SSD v2 data disk
+  # Set the shared Erlang cookie & Nodename env var BEFORE starting RabbitMQ
   - |
     HOSTNAME=$(hostname -s)
-    
-    # Ensure rabbitmq owns the data directory
-    chown -R rabbitmq:rabbitmq /var/lib/rabbitmq
-    chmod 750 /var/lib/rabbitmq
     
     echo "${erlang_cookie}" > /var/lib/rabbitmq/.erlang.cookie
     chown rabbitmq:rabbitmq /var/lib/rabbitmq/.erlang.cookie
@@ -170,18 +171,22 @@ runcmd:
   # Enable management plugin for monitoring
   - 'rabbitmq-plugins enable rabbitmq_management'
   
-  # Restart RabbitMQ with all plugins enabled
-  - 'systemctl restart rabbitmq-server'
+  # Restart RabbitMQ to load the management plugin
+  - |
+    echo "Restarting RabbitMQ to load plugins..."
+    df -h /var/lib/rabbitmq
+    systemctl restart rabbitmq-server
   
   # Wait for RabbitMQ to start before running the cluster script
   - |
+    #!/bin/bash
     echo "Waiting for RabbitMQ to be ready after restart..."
-    for i in {1..30}; do
+    for i in $(seq 1 30); do
       if rabbitmqctl await_startup >/dev/null 2>&1; then
         echo "RabbitMQ is ready"
         break
       fi
-      if [[ $i -eq 30 ]]; then
+      if [ "$i" -eq 30 ]; then
         echo "ERROR: RabbitMQ did not start in time"
         exit 1
       fi
