@@ -61,7 +61,7 @@ variable "cluster_nodes" {
     count                = 3
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
-    size                 = "Standard_D4s_v5"
+    size                 = "Standard_D4s_v6"
     zone                 = "1"
     admin_username       = "benchmarkuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"

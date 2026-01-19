@@ -13,7 +13,7 @@ packages:
 runcmd:
   # Install RabbitMQ 4.2.2 and Erlang
   - |
-    echo "[$(date)] Starting RabbitMQ 4.2.2 installation..."
+    echo "Starting RabbitMQ 4.2.2 installation..."
 
     # Import the official Team RabbitMQ signing key
     curl -1sLf "https://keys.openpgp.org/vks/v1/by-fingerprint/0A9AF2115F4687BD29803A206B73A36E6026DFCA" | gpg --dearmor | tee /usr/share/keyrings/com.rabbitmq.team.gpg > /dev/null
@@ -41,40 +41,40 @@ runcmd:
     # Pin the rmq version to prevent automatical upgrades
     apt-mark hold rabbitmq-server
 
-    echo "[$(date)] RabbitMQ 4.2.2 installed"
+    echo "RabbitMQ 4.2.2 installed"
 
     # Verify installation
-    rabbitmqctl version || echo "[$(date)] WARNING: RabbitMQ service not fully started yet"
+    rabbitmqctl version || echo "WARNING: RabbitMQ service not fully started yet"
 
   # Mount Premium SSD v2 data disk at /var/lib/rabbitmq before RabbitMQ starts
   - |
-    echo "[$(date)] Setting up Premium SSD v2 data disk for RabbitMQ..."
+    echo "Setting up Premium SSD v2 data disk for RabbitMQ..."
     
     # Wait for the data disk at LUN 10 to appear
     DISK_PATH="/dev/disk/azure/scsi1/lun10"
     for i in {1..60}; do
       if [ -e "$DISK_PATH" ]; then
-        echo "[$(date)] Data disk found at $DISK_PATH"
+        echo "Data disk found at $DISK_PATH"
         break
       fi
       if [ $i -eq 60 ]; then
-        echo "[$(date)] ERROR: Data disk not found at $DISK_PATH after 60 seconds"
+        echo "ERROR: Data disk not found at $DISK_PATH after 60 seconds"
         exit 1
       fi
-      echo "[$(date)] Waiting for data disk... ($i/60)"
+      echo "Waiting for data disk... ($i/60)"
       sleep 1
     done
     
     # Get the actual device path
     DEVICE=$(readlink -f "$DISK_PATH")
-    echo "[$(date)] Data disk device: $DEVICE"
+    echo "Data disk device: $DEVICE"
     
     # Check if disk is already formatted
     if ! blkid "$DEVICE" | grep -q xfs; then
-      echo "[$(date)] Formatting $DEVICE with XFS..."
+      echo "Formatting $DEVICE with XFS..."
       mkfs.xfs "$DEVICE"
     else
-      echo "[$(date)] Disk already formatted with XFS"
+      echo "Disk already formatted with XFS"
     fi
     
     # Create the RabbitMQ data directory
@@ -82,18 +82,18 @@ runcmd:
     
     # Get the UUID for fstab entry
     UUID=$(blkid -s UUID -o value "$DEVICE")
-    echo "[$(date)] Disk UUID: $UUID"
+    echo "Disk UUID: $UUID"
     
     # Add fstab entry if not already present
     # We need to use 'nofail' to avoid boot issues if anything goes wrong with the V2 SSD disk
     if ! grep -q "$UUID" /etc/fstab; then
       echo "UUID=$UUID /var/lib/rabbitmq xfs defaults,nofail 0 2" >> /etc/fstab
-      echo "[$(date)] Added fstab entry for data disk"
+      echo "Added fstab entry for data disk"
     fi
     
     # Mount the disk
     mount /var/lib/rabbitmq
-    echo "[$(date)] Data disk mounted at /var/lib/rabbitmq"
+    echo "Data disk mounted at /var/lib/rabbitmq"
     
     # Set ownership for rabbitmq user
     chown -R rabbitmq:rabbitmq /var/lib/rabbitmq 2>/dev/null || true
@@ -121,75 +121,50 @@ runcmd:
     #!/usr/bin/env bash
     set -euo pipefail
 
-    # Configuration vars
     SEED_NODE="${cluster_seed_host}"
     CLUSTER_NAME="${cluster_name}"
-    RETRIES=60
-    SLEEP_SECONDS=5
 
-    echo "[$(date)] Starting cluster formation script..."
-    echo "[$(date)] This node: $(hostname -s), Seed node: $SEED_NODE"
+    echo "Starting RabbitMQ cluster formation..."
 
-    # Wait for RabbitMQ to be fully started
-    echo "[$(date)] Waiting for RabbitMQ process to start..."
-    for attempt in $(seq 1 30); do
-      if sudo rabbitmqctl await_startup >/dev/null 2>&1; then
-        echo "[$(date)] RabbitMQ process is running"
-        break
-      fi
-      if [[ $attempt -eq 30 ]]; then
-        echo "[$(date)] ERROR: RabbitMQ process failed to start"
-        exit 1
-      fi
-      sleep 3
-    done
+    # Wait for local RabbitMQ
+    echo "Waiting for local RabbitMQ..."
+    timeout 180 bash -c 'until sudo rabbitmqctl await_startup 2>/dev/null; do sleep 3; done'
+    echo "Local RabbitMQ is running"
 
-    # If this is the seed node, set only cluster name
+    # If this is the seed node, set the cluster name
     if [[ "$(hostname -s)" == "$SEED_NODE" ]]; then
-      echo "[$(date)] This is the seed node, setting cluster name: $CLUSTER_NAME"
       sudo rabbitmqctl set_cluster_name "$CLUSTER_NAME"
+      echo "Seed node setup complete"
       exit 0
     fi
 
-    # If this is not the seed node, attempt to join the cluster
-    echo "[$(date)] Non-seed node - waiting for seed node to be reachable..."
-    for attempt in $(seq 1 "$RETRIES"); do
-      # Check if seed node is reachable
-      if ping -c 1 -W 1 "$SEED_NODE" >/dev/null 2>&1; then
-        echo "[$(date)] Seed node $SEED_NODE is reachable"
-        
-        # Wait a bit to ensure RabbitMQ is ready on seed
-        sleep 10
-        echo "[$(date)] Attempting to join cluster..."
-        break
+    # If this is not the seed node, wait for seed node's RabbitMQ to be ready (up to 10 min to avoid race-conditions during terraform)
+    echo "Waiting for seed node rabbit@$SEED_NODE..."
+    timeout 600 bash -c "until sudo rabbitmqctl -n rabbit@$SEED_NODE ping 2>/dev/null; do sleep 5; done"
+    echo "Seed node is ready"
+
+    # Join cluster
+    for i in {1..30}; do
+      echo "Join attempt $i/30..."
+      
+      # Check if already in cluster
+      if sudo rabbitmqctl cluster_status 2>/dev/null | grep -q "rabbit@$SEED_NODE"; then
+        echo "Already in cluster"; exit 0
       fi
 
-      # Max attempts reached
-      if [[ $attempt -eq $RETRIES ]]; then
-        echo "[$(date)] ERROR: Seed node not reachable after $RETRIES attempts"
-        exit 1
+      sudo rabbitmqctl stop_app
+      [[ $i -gt 1 ]] && sudo rabbitmqctl reset 2>/dev/null || true
+      
+      if sudo rabbitmqctl join_cluster "rabbit@$SEED_NODE" && sudo rabbitmqctl start_app; then
+        echo "Successfully joined cluster"; exit 0
       fi
-
-      # Wait before retrying
-      echo "[$(date)] Attempt $attempt/$RETRIES - seed node not yet reachable, waiting..."
-      sleep "$SLEEP_SECONDS"
+      
+      sudo rabbitmqctl start_app 2>/dev/null || true
+      sleep 10
     done
 
-    # Join the cluster
-    echo "[$(date)] Stopping RabbitMQ app to join cluster..."
-    sudo rabbitmqctl stop_app
-    
-    echo "[$(date)] Joining cluster rabbit@$SEED_NODE..."
-    if sudo rabbitmqctl join_cluster "rabbit@$SEED_NODE"; then
-      echo "[$(date)] Successfully joined cluster"
-    else
-      echo "[$(date)] ERROR: Failed to join cluster"
-      sudo rabbitmqctl start_app
-      exit 1
-    fi
-    
-    echo "[$(date)] Starting RabbitMQ again..."
-    sudo rabbitmqctl start_app
+    echo "ERROR: Failed to join cluster after 30 attempts"
+    exit 1
     SCRIPT_EOF
 
   # Enable management plugin for monitoring
@@ -200,14 +175,14 @@ runcmd:
   
   # Wait for RabbitMQ to start before running the cluster script
   - |
-    echo "[$(date)] Waiting for RabbitMQ to be ready after restart..."
+    echo "Waiting for RabbitMQ to be ready after restart..."
     for i in {1..30}; do
       if rabbitmqctl await_startup >/dev/null 2>&1; then
-        echo "[$(date)] RabbitMQ is ready"
+        echo "RabbitMQ is ready"
         break
       fi
       if [[ $i -eq 30 ]]; then
-        echo "[$(date)] ERROR: RabbitMQ did not start in time"
+        echo "ERROR: RabbitMQ did not start in time"
         exit 1
       fi
       sleep 3
