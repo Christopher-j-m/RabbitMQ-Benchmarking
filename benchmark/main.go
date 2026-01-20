@@ -3,7 +3,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/url"
@@ -283,8 +282,7 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	}
 
 	// Print Summary
-	formattedSummary, _ := json.MarshalIndent(summary, "", "  ")
-	fmt.Println(string(formattedSummary))
+	fmt.Println(summary)
 	logAndPrint("---------------------------------------------------")
 	logAndPrint("Results saved to: %s", metricsRecorder.GetResultsPath())
 	logAndPrint("Log file saved to: %s", logFile)

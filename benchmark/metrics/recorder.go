@@ -324,3 +324,21 @@ func (recorder *Recorder) GetSummary() Summary {
 		TotalErrorCount:  atomic.LoadInt64(&recorder.errorCount),
 	}
 }
+
+// Format the benchmark summary when printed to console
+func (s Summary) String() string {
+	var output string
+
+	if s.MeanThroughput > 0 {
+		output += fmt.Sprintf("%-22s %.2f msg/s\n", "Mean Throughput:", s.MeanThroughput)
+		output += fmt.Sprintf("%-22s %.2f msg/s\n", "StdDev Throughput:", s.StdDevThroughput)
+	}
+	if s.GlobalP99Latency > 0 {
+		output += fmt.Sprintf("%-22s %d µs\n", "Global P99 Latency:", s.GlobalP99Latency)
+	}
+	
+	output += fmt.Sprintf("%-22s %d", "Recording Errors:", s.TotalErrorCount)
+	return output
+}
+
+	
