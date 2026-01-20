@@ -75,10 +75,10 @@ type Recorder struct {
 	batchWg     sync.WaitGroup
 }
 
-func NewRecorder(experimentName string, quorumSize int, warmupSeconds int) (*Recorder, error) {
-	// Create results directory structure: results/<experiment-name>/<quorumSize>_<timestamp>/
+func NewRecorder(experimentName string, clusterSize int, warmupSeconds int) (*Recorder, error) {
+	// Create results directory structure: results/<experiment-name>/<clusterSize>_<timestamp>/
 	timestamp := time.Now().Format("20060102-150405")
-	resultsDir := filepath.Join("results", experimentName, fmt.Sprintf("%d_%s", quorumSize, timestamp))
+	resultsDir := filepath.Join("results", experimentName, fmt.Sprintf("%d_%s", clusterSize, timestamp))
 
 	if err := os.MkdirAll(resultsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create results directory: %w", err)

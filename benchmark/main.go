@@ -202,7 +202,13 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 
 	// Create the Metrics Recorder & start recording
 	// TODO: Make custom Recorders defineable per experiment (to keep being extensible)
-	metricsRecorder, err := metrics.NewRecorder(experimentName, quorumSize, warmup)
+	nodes, err := rabbitMQController.GetNodes()
+	if err != nil {
+		fatalf("Failed to get cluster nodes: %v", err)
+	}
+	clusterSize := len(nodes)
+
+	metricsRecorder, err := metrics.NewRecorder(experimentName, clusterSize, warmup)
 	if err != nil {
 		fatalf("Failed to create recorder: %v", err)
 	}
