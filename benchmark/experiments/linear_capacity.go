@@ -1,7 +1,7 @@
 // Linear Capacity Experiment
 //
 // Measures the throughput of a RabbitMQ cluster. To bypass the single-threaded bottleneck
-// of individual Erlang queue processes, this experiment supports creating multiple queues per node in order to allow 
+// of individual Erlang queue processes, this experiment supports creating multiple queues per node in order to allow
 // maximizing throughput.
 //
 // Publishers: Send messages as fast as possible without waiting for confirms
@@ -130,11 +130,11 @@ func (experiment *LinearCapacity) Setup(config Config, controller *rmq.Controlle
 			// Create the quorum queue
 			_, err = amqpChannel.QueueDeclare(
 				queueName, // queue name
-				true,  // durable - survives broker restarts
-				false, // delete when unused
-				false, // exclusive - not limited to this connection
-				false, // no-wait - wait for rmq ack that queue is created
-				args,  // optional args
+				true,      // durable - survives broker restarts
+				false,     // delete when unused
+				false,     // exclusive - not limited to this connection
+				false,     // no-wait - wait for rmq ack that queue is created
+				args,      // optional args
 			)
 
 			amqpChannel.Close()
@@ -231,13 +231,13 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 					// Start consuming messages
 					// => pkg.go.dev/github.com/rabbitmq/amqp091-go@v1.10.0#Channel.Consume
 					messages, err := amqpChannel.Consume(
-						queueName,     // queue
-						"",    // consumer - unique consumer identifier
-						false, // auto-ack - consumer must ack msgs
-						false, // exclusive - not the only consumer for this queue
-						false, // no-local - allow consuming msgs from the same connection
-						false, // no-wait - wait for rmq confirmation that consumer is registered
-						nil,   // specific args for queue or node server
+						queueName, // queue
+						"",        // consumer - unique consumer identifier
+						false,     // auto-ack - consumer must ack msgs
+						false,     // exclusive - not the only consumer for this queue
+						false,     // no-local - allow consuming msgs from the same connection
+						false,     // no-wait - wait for rmq confirmation that consumer is registered
+						nil,       // specific args for queue or node server
 					)
 					if err != nil {
 						log.Printf("Consumer failed to start consuming: %v", err)
@@ -313,7 +313,9 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 				// Background routing to handle the async acks from rmq
 				// Records in batches to reduce mutex contention in the recorder, since we expect high throughput here
 				// => Locking a mutex for every single message would cause contention and therefore reduce throughput of load generator
+				waitGroup.Add(1)
 				go func() {
+					defer waitGroup.Done()
 					const batchSize = 100
 					latencyBatch := make([]int64, 0, batchSize)
 					for confirmation := range confirmations {
@@ -345,10 +347,10 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 
 						// Publish the message
 						err := amqpChannel.PublishWithContext(ctx,
-							"",    // exchange - default: route to queue with name equal to routing key
-							queueName,     // routing key (queue name)
-							false, // mandatory - unroutable messages are dropped
-							false, // immediate - no immediate delivery required
+							"",        // exchange - default: route to queue with name equal to routing key
+							queueName, // routing key (queue name)
+							false,     // mandatory - unroutable messages are dropped
+							false,     // immediate - no immediate delivery required
 							amqp.Publishing{
 								ContentType: "text/plain",
 								Body:        payload,
