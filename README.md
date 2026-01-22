@@ -2,6 +2,8 @@
 
 > Part of the Cloud Service Benchmarking module at the Technische Universität Berlin during the Winter Term 25/26.
 
+![Project Flow Diagram](assets/project_flow_dg.svg)
+
 ## Table of Contents
 
 * [Requirements](#requirements)
@@ -19,7 +21,7 @@ The project has been tested on **Ubuntu 22.04** and **24.04**.
 | --- | --- |
 | **Setup** | [Terraform](https://developer.hashicorp.com/terraform/install) (1.14+)<br>[Azure CLI](https://www.google.com/search?q=https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) |
 | **Load Generator** | [Go](https://go.dev/dl/) (1.25+) |
-| **Cluster Nodes** | [RabbitMQ](https://www.rabbitmq.com/docs/download) (v3.13+) |
+| **Cluster Nodes** | [RabbitMQ](https://www.rabbitmq.com/docs/download) (3.13+) |
 
 ---
 
@@ -67,7 +69,7 @@ The Terraform setup generates a `config.txt` file in the `setup/utility` directo
 
 ### Build Benchmark CLI
 
-You can build and copy the CLI using the `deploy_benchmark.sh` utility script, or manually via:
+You can build and copy the CLI using the `deploy_benchmark.sh` utility script if you followed the [Setup Benchmark Environment](#setup-benchmark-environment) step, or manually via:
 
 ```bash
 cd benchmark && go build -o rmq-benchmark .
@@ -90,7 +92,7 @@ The CLI currently offers three independent experiments focused on measuring end-
 Measures the maximum throughput of the RabbitMQ cluster. **Example:**
 
 ```bash
-./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="your-password" --experiment=linear-capacity --publishers=160 --queue-length=1000 --warmup=120 --duration=1800 --queue-count=4
+./rmq-benchmark --mgmt-url="http://<cluster-node-ip>:15672" --rmq-user="your-admin-user" --rmq-password="your-password" --experiment=linear-capacity --publishers=160 --queue-length=1000 --warmup=0 --duration=3600 --queue-count=4
 
 ```
 
@@ -99,7 +101,7 @@ Measures the maximum throughput of the RabbitMQ cluster. **Example:**
 Measures the latency cost imposed by the [Raft consensus](https://www.rabbitmq.com/docs/quorum-queues#behaviour) under ideal conditions, using a fixed 1-publisher/1-consumer setup connected directly to the queue leader node. **Example:**
 
 ```bash
-./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="your-password" --experiment=ideal-latency --warmup=120 --duration=1800
+./rmq-benchmark --mgmt-url="http://<cluster-node-ip>:15672" --rmq-user="your-admin-user" --rmq-password="your-password" --experiment=ideal-latency --warmup=0 --duration=3600 --quorum-size=3
 
 ```
 
@@ -108,7 +110,7 @@ Measures the latency cost imposed by the [Raft consensus](https://www.rabbitmq.c
 Measures end-to-end latency in RabbitMQ Quorum Queues under heavy load. This experiment re-uses the approach of the `ideal-latency` for measuring the latency and the `linear-capacity` experiment for parallel stress generation on the cluster. **Example:**
 
 ```bash
-./rmq-benchmark --mgmt-url="http://10.0.1.7:15672" --rmq-user="admin" --rmq-password="your-password" --experiment=stress-latency --publishers=160 --queue-length=1000 --warmup=120 --duration=1800 --queue-count=4
+./rmq-benchmark --mgmt-url="http://<cluster-node-ip>:15672" --rmq-user="your-admin-user" --rmq-password="your-password" --experiment=stress-latency --publishers=10 --queue-length=1000 --warmup=0 --duration=3600 --queue-count=4 --quorum-size=3
 
 ```
 
@@ -116,7 +118,7 @@ Measures end-to-end latency in RabbitMQ Quorum Queues under heavy load. This exp
 
 ## Adding New Experiments
 
-To extend the benchmark suite with a new independent benchmark experiment:
+To extend the benchmark suite with a new benchmark experiment:
 
 1. Implement the experiment interface defined in `/experiments/interface.go`.
 2. Register the new experiment in `/experiments/registry.go`.
