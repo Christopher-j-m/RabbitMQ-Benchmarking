@@ -19,7 +19,7 @@ The project has been tested on **Ubuntu 22.04** and **24.04**.
 
 | Component | Requirement |
 | --- | --- |
-| **Setup** | [Terraform](https://developer.hashicorp.com/terraform/install) (1.14+)<br>[Azure CLI](https://www.google.com/search?q=https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) |
+| **Setup** | [Terraform](https://developer.hashicorp.com/terraform/install) (1.14+)<br>[Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli?view=azure-cli-latest) |
 | **Load Generator** | [Go](https://go.dev/dl/) (1.25+) |
 | **Cluster Nodes** | [RabbitMQ](https://www.rabbitmq.com/docs/download) (3.13+) |
 
