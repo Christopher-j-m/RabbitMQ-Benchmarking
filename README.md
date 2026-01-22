@@ -29,9 +29,9 @@ The project has been tested on **Ubuntu 22.04** and **24.04**.
 
 This repository contains an exemplary Terraform setup to provision a benchmark environment on Microsoft Azure. It automates dependency installation, deploys RabbitMQ via `cloud-init` and provides utility scripts to streamline CLI deployment and result collection.
 
-While custom environments (other cloud providers or local machines) are expected to be compatible with the benchmark CLI, it is recommended to stick to the configuration of the provided Terraform setup as closely as possible. In this case, you can skip to the [benchmark execution](#benchmark-execution).
+While custom environments (other cloud providers or local machines) are expected to be compatible with the benchmark CLI, it is recommended to stick to the configuration of the provided Terraform setup as closely as possible. In this case, you can skip to the [Benchmark Execution](#benchmark-execution) section.
 
-### Terraform (Microsoft Azure)
+### Terraform
 
 #### 1. Configuration
 
