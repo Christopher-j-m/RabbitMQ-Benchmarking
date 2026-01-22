@@ -1,4 +1,4 @@
-# RabbitMQ-Cluster Benchmarking CLI
+# RabbitMQ Cluster Benchmarking CLI
 
 > Part of the Cloud Service Benchmarking module at the Technische Universität Berlin during the Winter Term 25/26.
 
