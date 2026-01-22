@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-faker/faker/v4"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -35,22 +34,10 @@ func (experiment *ProxyLatency) Setup(config Config, controller *rmq.Controller)
 	experiment.config = config
 	experiment.controller = controller
 
-	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
+	// Pre-generate 1000 random payloads with with the specified fixed size
 	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
-	experiment.payloads = make([][]byte, 1000)
-	for i := range experiment.payloads {
-		size := 1024 + rand.IntN(4096)
-		text := faker.Paragraph()
-		b := make([]byte, size)
-		copy(b, text)
-		if len(text) < size {
-			for j := len(text); j < size; j++ {
-				b[j] = byte(rand.IntN(256))
-			}
-		}
-		experiment.payloads[i] = b
-	}
+	experiment.payloads = GeneratePayloads(1000, config.MsgSize)
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
 	// Connect to cluster to declare queue
@@ -60,7 +47,7 @@ func (experiment *ProxyLatency) Setup(config Config, controller *rmq.Controller)
 	}
 	amqpChannel, err := tempConnection.Channel()
 	if err != nil {
-		tempConnection.Close()
+		_ = tempConnection.Close()
 		return err
 	}
 
@@ -78,8 +65,8 @@ func (experiment *ProxyLatency) Setup(config Config, controller *rmq.Controller)
 		false,            // no-wait
 		args,             // arguments
 	)
-	amqpChannel.Close()
-	tempConnection.Close()
+	_ = amqpChannel.Close()
+	_ = tempConnection.Close()
 	if err != nil {
 		return err
 	}
@@ -160,7 +147,7 @@ func (experiment *ProxyLatency) Run(ctx context.Context, publishers int, metrics
 					log.Printf("Consumer failed to create channel: %v", err)
 					return
 				}
-				defer amqpChannel.Close()
+				defer func() { _ = amqpChannel.Close() }()
 
 				// Set QoS for the consumer channel to prefetch 50 messages
 				// Consumers will receive up to 50 unacknowledged messages at a time
@@ -172,13 +159,13 @@ func (experiment *ProxyLatency) Run(ctx context.Context, publishers int, metrics
 
 				// Start consuming messages
 				messages, err := amqpChannel.Consume(
-					experiment.config.QueueName, // queue
-					"",                   // consumer - unique consumer identifier
-					false,                // auto-ack - consumer must ack msgs
-					false,                // exclusive - not the only consumer for this queue
-					false,                // no-local - allow consuming msgs from the same connection
-					false,                // no-wait - wait for rmq confirmation that consumer is registered
-					nil,                  // optional args
+					experiment.config.QueueName, // queue name
+					"",                          // consumer - unique consumer identifier
+					false,                       // auto-ack - consumer must ack msgs
+					false,                       // exclusive - not the only consumer for this queue
+					false,                       // no-local - allow consuming msgs from the same connection
+					false,                       // no-wait - wait for rmq confirmation that consumer is registered
+					nil,                         // optional args
 				)
 				if err != nil {
 					log.Printf("Consumer failed to start consuming: %v", err)
@@ -194,7 +181,7 @@ func (experiment *ProxyLatency) Run(ctx context.Context, publishers int, metrics
 						if !ok {
 							return
 						}
-						delivery.Ack(false)
+						_ = delivery.Ack(false)
 					}
 				}
 			}()
@@ -218,7 +205,7 @@ func (experiment *ProxyLatency) Run(ctx context.Context, publishers int, metrics
 				log.Printf("Publisher failed to create channel: %v", err)
 				return
 			}
-			defer amqpChannel.Close()
+			defer func() { _ = amqpChannel.Close() }()
 
 			// Enable Publisher Confirms on this channel
 			// RMQ sends an ack for every published message once it is
@@ -257,10 +244,10 @@ func (experiment *ProxyLatency) Run(ctx context.Context, publishers int, metrics
 
 					// Publish the message
 					err := amqpChannel.PublishWithContext(ctx,
-						"",                   // exchange - default: route to queue with name equal to routing key
+						"",                          // exchange - default: route to queue with name equal to routing key
 						experiment.config.QueueName, // routing key (queue name)
-						false,                // mandatory - unroutable messages are dropped
-						false,                // immediate - no immediate delivery
+						false,                       // mandatory - unroutable messages are dropped
+						false,                       // immediate - no immediate delivery
 						amqp.Publishing{
 							ContentType: "text/plain",
 							Body:        payload,

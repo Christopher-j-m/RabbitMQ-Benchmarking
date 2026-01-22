@@ -46,9 +46,9 @@ variable "cluster_nodes" {
       disk_size_gb         = number
     })
     data_disk = object({
-      size_gb            = number
-      iops_read_write    = number
-      mbps_read_write    = number
+      size_gb         = number
+      iops_read_write = number
+      mbps_read_write = number
     })
     source_image = object({
       publisher = string
@@ -58,7 +58,7 @@ variable "cluster_nodes" {
     })
   })
   default = {
-    count                = 3
+    count                = 6
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
     size                 = "Standard_D4s_v6"
@@ -74,9 +74,9 @@ variable "cluster_nodes" {
     // Premium SSD v2 Data Disks to run rmq on it
     // => Cheaper than higher tier OS-disks with consistent IOPS & without burst
     data_disk = {
-      size_gb            = 256
-      iops_read_write    = 10000
-      mbps_read_write    = 600
+      size_gb         = 256
+      iops_read_write = 10000
+      mbps_read_write = 600
     }
     source_image = {
       publisher = "Canonical"

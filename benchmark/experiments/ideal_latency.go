@@ -4,7 +4,7 @@
 // with a fixed a fixed 1-publisher/1-consumer setup connected directly to the queue leader node.
 // Inject timestamp into message headers for end-to-end latency calculation.
 //
-// Publisher: Send messages synchronously, waiting for a ack before sending the next one. 
+// Publisher: Send messages synchronously, waiting for a ack before sending the next one.
 // Consumer: Extracts 'x-sent-at' headers for latency calculation.
 // Metrics: Latency (P99, P95, Mean)
 package experiments
@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-faker/faker/v4"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -36,22 +35,10 @@ func (experiment *IdealLatency) Setup(config Config, controller *rmq.Controller)
 	experiment.config = config
 	experiment.controller = controller
 
-	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
+	// Pre-generate 1000 random payloads with with the specified fixed size
 	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
-	experiment.payloads = make([][]byte, 1000)
-	for i := range experiment.payloads {
-		size := 1024 + rand.IntN(4096)
-		text := faker.Paragraph()
-		b := make([]byte, size)
-		copy(b, text)
-		if len(text) < size {
-			for j := len(text); j < size; j++ {
-				b[j] = byte(rand.IntN(256))
-			}
-		}
-		experiment.payloads[i] = b
-	}
+	experiment.payloads = GeneratePayloads(1000, config.MsgSize)
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
 	// Connect to cluster
@@ -59,7 +46,7 @@ func (experiment *IdealLatency) Setup(config Config, controller *rmq.Controller)
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 
 	// Delete existing queues with the same name as the ones
 	// that will be created during this experiment
@@ -70,14 +57,14 @@ func (experiment *IdealLatency) Setup(config Config, controller *rmq.Controller)
 
 	log.Printf("Deleting existing queue %s...", config.QueueName)
 	_, _ = channelDelete.QueueDelete(config.QueueName, false, false, false)
-	channelDelete.Close()
+	_ = channelDelete.Close()
 
 	// Create a channel for queue declaration
 	amqpChannel, err := connection.Channel()
 	if err != nil {
 		return err
 	}
-	defer amqpChannel.Close()
+	defer func() { _ = amqpChannel.Close() }()
 
 	// Configure the queue as a quorum queue with the specified initial group size.
 	args := amqp.Table{
@@ -162,17 +149,17 @@ func (experiment *IdealLatency) Run(ctx context.Context, publishers int, metrics
 			log.Printf("Consumer failed to create channel: %v", err)
 			return
 		}
-		defer amqpChannel.Close()
+		defer func() { _ = amqpChannel.Close() }()
 
 		// Start consuming messages
 		messages, err := amqpChannel.Consume(
-			experiment.config.QueueName, // queue
-			"",                 // consumer - unique consumer identifier
-			false,              // auto-ack - consumer must ack msgs
-			false,              // exclusive - not the only consumer for this queue
-			false,              // no-local - allow consuming msgs from the same connection
-			false,              // no-wait - wait for rmq confirmation that consumer is registered
-			nil,                // optional args
+			experiment.config.QueueName, // queue name
+			"",                          // consumer - unique consumer identifier
+			false,                       // auto-ack - consumer must ack msgs
+			false,                       // exclusive - not the only consumer for this queue
+			false,                       // no-local - allow consuming msgs from the same connection
+			false,                       // no-wait - wait for rmq confirmation that consumer is registered
+			nil,                         // optional args
 		)
 		if err != nil {
 			log.Printf("Consumer failed to start consuming: %v", err)
@@ -213,7 +200,7 @@ func (experiment *IdealLatency) Run(ctx context.Context, publishers int, metrics
 					}
 				}
 
-				delivery.Ack(false)
+				_ = delivery.Ack(false)
 			}
 		}
 	}(consumerConn, metricsRecorder)
@@ -235,7 +222,7 @@ func (experiment *IdealLatency) Run(ctx context.Context, publishers int, metrics
 			log.Printf("Publisher failed to create channel: %v", err)
 			return
 		}
-		defer amqpChannel.Close()
+		defer func() { _ = amqpChannel.Close() }()
 
 		// Enable Publisher Confirms on this channel
 		// RMQ sends an ack for every published message once it is
@@ -262,10 +249,10 @@ func (experiment *IdealLatency) Run(ctx context.Context, publishers int, metrics
 
 				// Publish the message with timestamp header for end-to-end latency calculation
 				err := amqpChannel.PublishWithContext(ctx,
-					"",                 // exchange - default: route to queue with name equal to routing key
+					"",                          // exchange - default: route to queue with name equal to routing key
 					experiment.config.QueueName, // routing key (queue name)
-					false,              // mandatory - unroutable messages are dropped
-					false,              // immediate - no immediate delivery
+					false,                       // mandatory - unroutable messages are dropped
+					false,                       // immediate - no immediate delivery
 					amqp.Publishing{
 						ContentType: "text/plain",
 						Headers:     amqp.Table{"x-sent-at": time.Now().UnixNano()},
@@ -316,7 +303,7 @@ func (experiment *IdealLatency) Run(ctx context.Context, publishers int, metrics
 func (experiment *IdealLatency) Teardown() error {
 	for _, connection := range experiment.connections {
 		if connection != nil {
-			connection.Close()
+			_ = connection.Close()
 		}
 	}
 	return nil

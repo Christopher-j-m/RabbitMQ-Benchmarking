@@ -144,9 +144,9 @@ func (recorder *Recorder) processBatches() {
 		// Exclude measurements during warmup
 		if time.Since(recorder.startTime) > recorder.warmup {
 			for _, us := range batch.Latencies {
-				recorder.windowHistogram.RecordValue(us)
+				_ = recorder.windowHistogram.RecordValue(us)
 				recorder.windowMsgCount++
-				recorder.globalHistogram.RecordValue(us)
+				_ = recorder.globalHistogram.RecordValue(us)
 				recorder.globalMsgCount++
 			}
 		}
@@ -171,9 +171,9 @@ func (recorder *Recorder) RecordLatencyBatch(latenciesUs []int64) {
 		// Exclude measurements during warmup
 		if time.Since(recorder.startTime) > recorder.warmup {
 			for _, us := range latenciesUs {
-				recorder.windowHistogram.RecordValue(us)
+				_ = recorder.windowHistogram.RecordValue(us)
 				recorder.windowMsgCount++
-				recorder.globalHistogram.RecordValue(us)
+				_ = recorder.globalHistogram.RecordValue(us)
 				recorder.globalMsgCount++
 			}
 		}
@@ -230,7 +230,7 @@ func (recorder *Recorder) flushWindow(flushTime time.Time) {
 			fmt.Sprintf("%d", p99),
 			fmt.Sprintf("%.2f", stdDev),
 		}
-		recorder.csvWriter.Write(record)
+		_ = recorder.csvWriter.Write(record)
 		recorder.csvWriter.Flush()
 
 		// Store throughput for summary
@@ -250,7 +250,7 @@ func (recorder *Recorder) Stop() {
 	close(recorder.latencyChan)
 	recorder.batchWg.Wait()
 
-	recorder.file.Close()
+	_ = recorder.file.Close()
 }
 
 // The metrics that will be printed out at the end of an experiment for a general overview of the experiment results
@@ -268,7 +268,7 @@ func (recorder *Recorder) WriteConfig(config BenchmarkConfig) error {
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	encoder := json.NewEncoder(f)
 	encoder.SetIndent("", "  ")
@@ -336,9 +336,7 @@ func (s Summary) String() string {
 	if s.GlobalP99Latency > 0 {
 		output += fmt.Sprintf("%-22s %d µs\n", "Global P99 Latency:", s.GlobalP99Latency)
 	}
-	
+
 	output += fmt.Sprintf("%-22s %d", "Recording Errors:", s.TotalErrorCount)
 	return output
 }
-
-	

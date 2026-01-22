@@ -4,7 +4,7 @@
 // This experiment combines the latency measurement approach from ideal_latency with
 // heavy stress generation (fire-and-forget publishers) similar to linear_capacity.
 //
-// This simulates worst-case performance scenarios where the cluster is under heavy load 
+// This simulates worst-case performance scenarios where the cluster is under heavy load
 // and we measure the end-to-end latency that a single publisher/consumer pair experiences.
 //
 // Stress Publishers: Send messages as fast as possible without waiting for confirms (not used for measurements, just to stress the cluster)
@@ -25,7 +25,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-faker/faker/v4"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -45,22 +44,10 @@ func (experiment *StressLatency) Setup(config Config, controller *rmq.Controller
 	experiment.config = config
 	experiment.controller = controller
 
-	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
+	// Pre-generate 1000 random payloads with with the specified fixed size
 	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
-	experiment.payloads = make([][]byte, 1000)
-	for i := range experiment.payloads {
-		size := 1024 + rand.IntN(4096)
-		text := faker.Paragraph()
-		b := make([]byte, size)
-		copy(b, text)
-		if len(text) < size {
-			for j := len(text); j < size; j++ {
-				b[j] = byte(rand.IntN(256))
-			}
-		}
-		experiment.payloads[i] = b
-	}
+	experiment.payloads = GeneratePayloads(1000, config.MsgSize)
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
 	// Connect to cluster to declare the main latency queue
@@ -68,7 +55,7 @@ func (experiment *StressLatency) Setup(config Config, controller *rmq.Controller
 	if err != nil {
 		return err
 	}
-	defer connection.Close()
+	defer func() { _ = connection.Close() }()
 
 	// Delete existing main queue if it already exists
 	channelDelete, err := connection.Channel()
@@ -78,13 +65,13 @@ func (experiment *StressLatency) Setup(config Config, controller *rmq.Controller
 
 	log.Printf("Deleting existing queue %s (if any)...", config.QueueName)
 	_, _ = channelDelete.QueueDelete(config.QueueName, false, false, false)
-	channelDelete.Close()
+	_ = channelDelete.Close()
 
 	amqpChannel, err := connection.Channel()
 	if err != nil {
 		return err
 	}
-	defer amqpChannel.Close()
+	defer func() { _ = amqpChannel.Close() }()
 
 	// Configure the queue as a quorum queue with the specified initial group size
 	args := amqp.Table{
@@ -162,17 +149,17 @@ func (experiment *StressLatency) Setup(config Config, controller *rmq.Controller
 			// that will be created during this experiment
 			channelDelete, err := stressConn.Channel()
 			if err != nil {
-				stressConn.Close()
+				_ = stressConn.Close()
 				return fmt.Errorf("failed to open channel for deletion: %w", err)
 			}
 
 			log.Printf("Deleting existing stress queue %s (if any)...", queueName)
 			_, _ = channelDelete.QueueDelete(queueName, false, false, false)
-			channelDelete.Close()
+			_ = channelDelete.Close()
 
 			stressChannel, err := stressConn.Channel()
 			if err != nil {
-				stressConn.Close()
+				_ = stressConn.Close()
 				return err
 			}
 
@@ -200,14 +187,14 @@ func (experiment *StressLatency) Setup(config Config, controller *rmq.Controller
 				false,      // no-wait
 				stressArgs, // stress-specific quorum args
 			)
-			stressChannel.Close()
+			_ = stressChannel.Close()
 			if err != nil {
-				stressConn.Close()
+				_ = stressConn.Close()
 				return err
 			}
 		}
 
-		stressConn.Close()
+		_ = stressConn.Close()
 	}
 
 	log.Printf("Created %d stress queues across %d nodes (%d queues per node)", len(experiment.stressQueues), len(nodes), config.QueueCount)
@@ -304,7 +291,7 @@ func (experiment *StressLatency) Run(ctx context.Context, publishers int, metric
 	log.Printf("Publisher Distribution (one connection per worker):")
 	log.Printf("  - Leader Node: %d Latency + %d Stress Publishers", latencyPublishers, stressPublishersPerNode)
 	log.Printf("  - Other Nodes: %d Stress Publishers", stressPublishersPerNode)
-	
+
 	queueCount := len(experiment.stressQueuesByNode[0])
 	stressCounter := 0
 	for nodeIdx := range experiment.stressConnURLs {
@@ -360,7 +347,7 @@ func (experiment *StressLatency) runConsumerWithConn(ctx context.Context, connec
 	// Close channel when context is done to unblock the consumer
 	go func() {
 		<-ctx.Done()
-		amqpChannel.Close()
+		_ = amqpChannel.Close()
 	}()
 
 	if err := amqpChannel.Qos(50, 0, false); err != nil {
@@ -415,7 +402,7 @@ func (experiment *StressLatency) runConsumerWithConn(ctx context.Context, connec
 			}
 		}
 
-		delivery.Ack(false)
+		_ = delivery.Ack(false)
 	}
 
 	// Flush remaining latencies when channel closes
@@ -433,7 +420,7 @@ func (experiment *StressLatency) runStressPublisherWithConn(ctx context.Context,
 		log.Printf("Stress publisher failed to create channel: %v", err)
 		return
 	}
-	defer amqpChannel.Close()
+	defer func() { _ = amqpChannel.Close() }()
 
 	if err := amqpChannel.Confirm(false); err != nil {
 		log.Printf("Stress publisher failed to enable confirms: %v", err)
@@ -487,7 +474,7 @@ func (experiment *StressLatency) runLatencyPublisherWithConn(ctx context.Context
 		log.Printf("Latency publisher failed to create channel: %v", err)
 		return
 	}
-	defer amqpChannel.Close()
+	defer func() { _ = amqpChannel.Close() }()
 
 	if err := amqpChannel.Confirm(false); err != nil {
 		log.Printf("Latency publisher failed to enable confirms: %v", err)
@@ -505,10 +492,10 @@ func (experiment *StressLatency) runLatencyPublisherWithConn(ctx context.Context
 
 			// Publish with timestamp header for end-to-end latency calculation
 			err := amqpChannel.PublishWithContext(ctx,
-				"",                 // exchange
+				"",                          // exchange
 				experiment.config.QueueName, // routing key (main latency queue)
-				false,              // mandatory
-				false,              // immediate
+				false,                       // mandatory
+				false,                       // immediate
 				amqp.Publishing{
 					ContentType: "text/plain",
 					Headers:     amqp.Table{"x-sent-at": time.Now().UnixNano()},
@@ -546,7 +533,7 @@ func (experiment *StressLatency) runLatencyPublisherWithConn(ctx context.Context
 func (experiment *StressLatency) Teardown() error {
 	for _, connection := range experiment.connections {
 		if connection != nil {
-			connection.Close()
+			_ = connection.Close()
 		}
 	}
 	return nil

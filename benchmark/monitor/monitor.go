@@ -247,11 +247,12 @@ func (monitor *Monitor) buildDisplay(stats SystemStats, elapsed int, phase Phase
 func (monitor *Monitor) buildStatsLine(stats SystemStats, phase Phase) string {
 	// Phase indicator
 	var phaseStr string
-	if phase == PhaseFinished {
+	switch phase {
+	case PhaseFinished:
 		phaseStr = fmt.Sprintf("%s%s● FINISHED%s", colorBold, colorBlue, colorReset)
-	} else if phase == PhaseWarmup {
+	case PhaseWarmup:
 		phaseStr = fmt.Sprintf("%s%s● WARMUP %s", colorBold, colorYellow, colorReset)
-	} else {
+	default:
 		phaseStr = fmt.Sprintf("%s%s● MEASURE%s", colorBold, colorGreen, colorReset)
 	}
 

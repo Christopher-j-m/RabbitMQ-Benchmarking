@@ -52,7 +52,7 @@ func (controller *Controller) GetQueueLeaderNode(vhost, queueName string) (strin
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode != 200 {
 		return "", fmt.Errorf("failed to get queue info: status %d", response.StatusCode)
@@ -95,7 +95,7 @@ func (controller *Controller) GetNodes() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	if response.StatusCode != 200 {
 		return nil, fmt.Errorf("failed to get nodes: status %d", response.StatusCode)
@@ -129,11 +129,11 @@ func (controller *Controller) Connect(url string) (*amqp.Connection, error) {
 			if tcpConn, ok := connection.(*net.TCPConn); ok {
 				// Keep tcp connections alive and send keep-alive packets every 30 seconds
 				// => prevent unexpected connection drops during the benchmark
-				tcpConn.SetKeepAlive(true)
-				tcpConn.SetKeepAlivePeriod(30 * time.Second)
+				_ = tcpConn.SetKeepAlive(true)
+				_ = tcpConn.SetKeepAlivePeriod(30 * time.Second)
 				// Reduce latency by disabling Nagle's algorithm,
 				// => removes another factor that impacts our latency measurements
-				tcpConn.SetNoDelay(true)
+				_ = tcpConn.SetNoDelay(true)
 			}
 			return connection, nil
 		},
@@ -162,7 +162,7 @@ func (controller *Controller) DeleteQueue(vhost, queueName string) error {
 	if err != nil {
 		return err
 	}
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	// 204 No Content = success, 404 = queue doesn't exist (also fine)
 	if response.StatusCode != 204 && response.StatusCode != 404 {
@@ -182,7 +182,7 @@ func (controller *Controller) DeleteQueue(vhost, queueName string) error {
 			if err != nil {
 				continue
 			}
-			checkResponse.Body.Close()
+			_ = checkResponse.Body.Close()
 			if checkResponse.StatusCode == 404 {
 				// Queue is confirmed deleted
 				return nil

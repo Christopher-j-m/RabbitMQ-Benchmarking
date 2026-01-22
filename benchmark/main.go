@@ -48,15 +48,15 @@ func main() {
 	rootCmd.Flags().StringVar(&rabbitMQUser, "rmq-user", "", "RabbitMQ User (Required)")
 	rootCmd.Flags().StringVar(&rabbitMQPassword, "rmq-password", "", "RabbitMQ Password (Required)")
 	rootCmd.Flags().StringVar(&queueName, "queue-name", "benchmark-queue", "Queue Name")
+	rootCmd.Flags().IntVar(&queueCount, "queue-count", 1, "Number of queues to create per node")
+	rootCmd.Flags().IntVar(&queueMaxLength, "queue-length", 0, "Maximum queue length (0 = unlimited)")
+	rootCmd.Flags().StringVar(&queueOverflowStrategy, "queue-overflow", "drop-head", "Queue overflow behavior when queue-length > 0: 'drop-head', 'reject-publish', or 'reject-publish-dlx'")
 	rootCmd.Flags().IntVar(&quorumSize, "quorum-size", 3, "Quorum Queue Group Size")
 	rootCmd.Flags().IntVar(&msgSize, "msg-size", 1024, "Message Size in Bytes")
 	rootCmd.Flags().IntVar(&warmup, "warmup", 60, "Warmup duration in seconds")
 	rootCmd.Flags().IntVar(&duration, "duration", 600, "Test duration in seconds")
 	rootCmd.Flags().IntVar(&publishers, "publishers", 10, "Number of concurrent publishers per node")
 	rootCmd.Flags().IntVar(&consumers, "consumers", 0, "Number of concurrent consumers per node")
-	rootCmd.Flags().IntVar(&queueMaxLength, "queue-length", 0, "Maximum queue length (0 = unlimited)")
-	rootCmd.Flags().StringVar(&queueOverflowStrategy, "queue-overflow", "drop-head", "Queue overflow behavior when queue-length > 0: 'drop-head', 'reject-publish', or 'reject-publish-dlx'")
-	rootCmd.Flags().IntVar(&queueCount, "queue-count", 1, "Number of queues to create per node")
 
 	experimentsList := experiments.ListExperiments()
 	helpText := fmt.Sprintf("Experiment to run: %v (Required)", experimentsList)
@@ -64,10 +64,10 @@ func main() {
 
 	// Mark flags as required and throw error if any are missing
 	// We require users to explicitly specify these parameters
-	rootCmd.MarkFlagRequired("mgmt-url")
-	rootCmd.MarkFlagRequired("rmq-user")
-	rootCmd.MarkFlagRequired("rmq-password")
-	rootCmd.MarkFlagRequired("experiment")
+	_ = rootCmd.MarkFlagRequired("mgmt-url")
+	_ = rootCmd.MarkFlagRequired("rmq-user")
+	_ = rootCmd.MarkFlagRequired("rmq-password")
+	_ = rootCmd.MarkFlagRequired("experiment")
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Println(err)
@@ -116,7 +116,7 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 		fmt.Printf("Failed to open log file: %v\n", err)
 		os.Exit(1)
 	}
-	defer logFileHandle.Close()
+	defer func() { _ = logFileHandle.Close() }()
 
 	// Log from now on per default only to log file to avoid interfering with progress bar
 	log.SetOutput(logFileHandle)
@@ -198,7 +198,7 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	if err := experiment.Setup(config, rabbitMQController); err != nil {
 		fatalf("Failed to configure the experiment: %v", err)
 	}
-	defer experiment.Teardown()
+	defer func() { _ = experiment.Teardown() }()
 
 	// Create the Metrics Recorder & start recording
 	nodes, err := rabbitMQController.GetNodes()

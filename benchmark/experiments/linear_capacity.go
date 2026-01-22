@@ -20,7 +20,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-faker/faker/v4"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -39,22 +38,10 @@ func (experiment *LinearCapacity) Setup(config Config, controller *rmq.Controlle
 	experiment.config = config
 	experiment.controller = controller
 
-	// Pre-generate 1000 payloads with random sizes (1KB to 5KB)
+	// Pre-generate 1000 random payloads with with the specified fixed size
 	// => prevents delays in the publisher routines during the measurement
 	log.Println("Generating test data...")
-	experiment.payloads = make([][]byte, 1000)
-	for i := range experiment.payloads {
-		size := 1024 + rand.IntN(4096)
-		text := faker.Paragraph()
-		b := make([]byte, size)
-		copy(b, text)
-		if len(text) < size {
-			for j := len(text); j < size; j++ {
-				b[j] = byte(rand.IntN(256))
-			}
-		}
-		experiment.payloads[i] = b
-	}
+	experiment.payloads = GeneratePayloads(1000, config.MsgSize)
 	log.Println("Data generation complete. Connecting to RabbitMQ...")
 
 	// Discover all cluster nodes
@@ -95,18 +82,18 @@ func (experiment *LinearCapacity) Setup(config Config, controller *rmq.Controlle
 			// that will be created during this experiment
 			channelDelete, err := connection.Channel()
 			if err != nil {
-				connection.Close()
+				_ = connection.Close()
 				return fmt.Errorf("failed to create delete channel: %w", err)
 			}
 
 			log.Printf("Deleting existing queue %s...", queueName)
 			_, _ = channelDelete.QueueDelete(queueName, false, false, false)
-			channelDelete.Close()
+			_ = channelDelete.Close()
 
 			// Create a channel for queue declaration
 			amqpChannel, err := connection.Channel()
 			if err != nil {
-				connection.Close()
+				_ = connection.Close()
 				return err
 			}
 
@@ -137,14 +124,14 @@ func (experiment *LinearCapacity) Setup(config Config, controller *rmq.Controlle
 				args,      // optional args
 			)
 
-			amqpChannel.Close()
+			_ = amqpChannel.Close()
 			if err != nil {
-				connection.Close()
+				_ = connection.Close()
 				return err
 			}
 		}
 
-		connection.Close()
+		_ = connection.Close()
 	}
 
 	log.Printf("Created %d queues across %d nodes (%d queues per node)", len(experiment.queues), len(nodes), config.QueueCount)
@@ -218,7 +205,7 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 						log.Printf("Consumer failed to create channel: %v", err)
 						return
 					}
-					defer amqpChannel.Close()
+					defer func() { _ = amqpChannel.Close() }()
 
 					// Set QoS for the consumer channel to prefetch 50 messages
 					// Consumers will receive up to 50 unacknowledged messages at a time
@@ -253,7 +240,7 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 							if !ok {
 								return
 							}
-							delivery.Ack(false)
+							_ = delivery.Ack(false)
 						}
 					}
 				}(nodeIdx, queueName)
@@ -298,7 +285,7 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 					log.Printf("Publisher failed to create channel: %v", err)
 					return
 				}
-				defer amqpChannel.Close()
+				defer func() { _ = amqpChannel.Close() }()
 
 				if err := amqpChannel.Confirm(false); err != nil {
 					log.Printf("Publisher failed to enable confirms: %v", err)
@@ -375,7 +362,7 @@ func (experiment *LinearCapacity) Run(ctx context.Context, publishers int, metri
 
 func (experiment *LinearCapacity) Teardown() error {
 	for _, connection := range experiment.connections {
-		connection.Close()
+		_ = connection.Close()
 	}
 	return nil
 }
