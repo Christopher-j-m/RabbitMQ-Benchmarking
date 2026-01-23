@@ -122,7 +122,7 @@ Measures end-to-end latency in RabbitMQ Quorum Queues under heavy load. This exp
 | **6 Nodes** | `./rmq-benchmark --mgmt-url="http://<cluster-node-ip>:15672" --rmq-user="your-admin-user" --rmq-password="your-password" --experiment=stress-latency --publishers=10 --queue-length=1000 --warmup=0 --duration=3600 --queue-count=4 --quorum-size=6` |
 | **9 Nodes** | `./rmq-benchmark --mgmt-url="http://<cluster-node-ip>:15672" --rmq-user="your-admin-user" --rmq-password="your-password" --experiment=stress-latency --publishers=10 --queue-length=1000 --warmup=0 --duration=3600 --queue-count=4 --quorum-size=9` |
 
-> **Note:** Make sure that `--mgmt-url` points to a specific node within the RabbitMQ cluster that has the [RabbitMQ Management Plugin](https://www.rabbitmq.com/docs/management) installed.
+> **Note:** Ensure --mgmt-url uses a cluster node's private VNET IP or alternatively open the AMQ port 5672. The CLI derives the AMQP connection string from this address and the AMQP port is intentionally restricted to internal traffic in the example [Terraform setup](#terraform).
 
 ---
 
