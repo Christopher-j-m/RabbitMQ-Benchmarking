@@ -58,7 +58,7 @@ variable "cluster_nodes" {
     })
   })
   default = {
-    count                = 9
+    count                = 3
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
     size                 = "Standard_D4s_v6"
