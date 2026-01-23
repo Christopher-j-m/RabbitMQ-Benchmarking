@@ -110,6 +110,10 @@ func runBenchmark(cmd *cobra.Command, args []string) {
 	// Log file named in the following format: benchmark_<experiment>_<timestamp>.log
 	timestamp := time.Now().Format("20060102-150405")
 	logFile := filepath.Join(logsDir, fmt.Sprintf("benchmark_%s_%s.log", experimentName, timestamp))
+	logFileAbsPath, err := filepath.Abs(logFile)
+	if err == nil {
+		logFile = logFileAbsPath
+	}
 	logFileHandle, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 
 	if err != nil {

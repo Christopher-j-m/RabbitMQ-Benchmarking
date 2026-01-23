@@ -88,6 +88,13 @@ func NewRecorder(experimentName string, clusterSize int, warmupSeconds int) (*Re
 	filename := filepath.Join(resultsDir, "results.csv")
 	configFile := filepath.Join(resultsDir, "results.config")
 
+	if logFileAbsPath, err := filepath.Abs(filename); err == nil {
+		filename = logFileAbsPath
+	}
+	if configFileAbsPath, err := filepath.Abs(configFile); err == nil {
+		configFile = configFileAbsPath
+	}
+
 	csvFile, err := os.Create(filename)
 	if err != nil {
 		return nil, err
