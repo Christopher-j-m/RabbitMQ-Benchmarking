@@ -36,6 +36,7 @@ variable "cluster_nodes" {
     name_prefix          = string
     cluster_name         = string
     size                 = string
+    zone                 = string
     admin_username       = string
     admin_ssh_key_path   = string
     cloud_init_file_path = string
@@ -43,6 +44,11 @@ variable "cluster_nodes" {
       storage_account_type = string
       caching              = string
       disk_size_gb         = number
+    })
+    data_disk = object({
+      size_gb         = number
+      iops_read_write = number
+      mbps_read_write = number
     })
     source_image = object({
       publisher = string
@@ -55,8 +61,9 @@ variable "cluster_nodes" {
     count                = 3
     name_prefix          = "rabbit-cluster-node"
     cluster_name         = "rmq-benchmark-cluster"
-    size                 = "Standard_D2s_v5"
-    admin_username       = "azureuser"
+    size                 = "Standard_D4s_v6"
+    zone                 = "1"
+    admin_username       = "benchmarkuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/cluster-init.tpl"
     os_disk = {
@@ -64,10 +71,17 @@ variable "cluster_nodes" {
       caching              = "ReadWrite"
       disk_size_gb         = 30
     }
+    // Premium SSD v2 Data Disks to run rmq on it
+    // => Cheaper than higher tier OS-disks with consistent IOPS & without burst
+    data_disk = {
+      size_gb         = 256
+      iops_read_write = 10000
+      mbps_read_write = 600
+    }
     source_image = {
       publisher = "Canonical"
-      offer     = "0001-com-ubuntu-server-jammy"
-      sku       = "22_04-lts-gen2"
+      offer     = "ubuntu-24_04-lts"
+      sku       = "server"
       version   = "latest"
     }
   }
@@ -97,8 +111,8 @@ variable "load_generators" {
   default = {
     count                = 1
     name_prefix          = "rabbit-loadgen-node"
-    size                 = "Standard_F8s_v2"
-    admin_username       = "azureuser"
+    size                 = "Standard_F32s_v2"
+    admin_username       = "benchmarkuser"
     admin_ssh_key_path   = "~/.ssh/csb_project_setup.pub"
     cloud_init_file_path = "../cloud-init/loadgen-node-init.tpl"
     os_disk = {
@@ -108,8 +122,8 @@ variable "load_generators" {
     }
     source_image = {
       publisher = "Canonical"
-      offer     = "0001-com-ubuntu-server-jammy"
-      sku       = "22_04-lts-gen2"
+      offer     = "ubuntu-24_04-lts"
+      sku       = "server"
       version   = "latest"
     }
   }

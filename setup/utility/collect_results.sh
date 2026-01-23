@@ -26,10 +26,6 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-print_step() {
-    echo -e "${BLUE}[STEP]${NC} $1"
-}
-
 # Check if config file exists
 if [[ ! -f "$CONFIG_FILE" ]]; then
     print_error "Configuration file '$CONFIG_FILE' not found!"

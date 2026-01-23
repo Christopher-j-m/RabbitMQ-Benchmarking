@@ -17,5 +17,5 @@ output "load_generator_ip" {
 # RabbitMQ Management UI URLs
 output "rmq_management_ui" {
   description = "URLs for accessing the management UI on each provisioned RabbitMQ node."
-  value = { for idx, pip in azurerm_public_ip.cluster_pip : format("%s-%02d", var.cluster_nodes.name_prefix, idx + 1) => "http://${pip.ip_address}:15672/" }
+  value       = { for idx, pip in azurerm_public_ip.cluster_pip : format("%s-%02d", var.cluster_nodes.name_prefix, idx + 1) => "http://${pip.ip_address}:15672/" }
 }
