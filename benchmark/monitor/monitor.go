@@ -39,6 +39,7 @@ type Phase int
 const (
 	PhaseWarmup Phase = iota
 	PhaseMeasure
+	PhaseFinished
 )
 
 // Current system metrics of the load generator
@@ -59,7 +60,7 @@ type DisplayConfig struct {
 
 type Monitor struct {
 	currentStats SystemStats
-	mu           sync.RWMutex
+	mutex        sync.RWMutex
 	stopChan     chan struct{}
 
 	// Display state
@@ -85,8 +86,8 @@ func NewMonitor() *Monitor {
 }
 
 // ConfigureDisplay sets up the progress display parameters
-func (m *Monitor) ConfigureDisplay(totalSeconds, warmupSeconds int) {
-	m.config = DisplayConfig{
+func (monitor *Monitor) ConfigureDisplay(totalSeconds, warmupSeconds int) {
+	monitor.config = DisplayConfig{
 		TotalSeconds:  totalSeconds,
 		WarmupSeconds: warmupSeconds,
 		BarWidth:      50,
@@ -94,40 +95,71 @@ func (m *Monitor) ConfigureDisplay(totalSeconds, warmupSeconds int) {
 }
 
 // Start the system stats fetching loop
-func (m *Monitor) Start() {
-	go m.updateLoop()
+func (monitor *Monitor) Start() {
+	go monitor.updateLoop()
 }
 
 // Start the progress bar display loop
-func (m *Monitor) StartDisplay() {
-	m.startTime = time.Now()
-	m.displayTicker = time.NewTicker(500 * time.Millisecond)
+func (monitor *Monitor) StartDisplay() {
+	monitor.startTime = time.Now()
+	monitor.displayTicker = time.NewTicker(500 * time.Millisecond)
 
 	// Hide cursor
 	fmt.Fprint(os.Stderr, "\033[?25l")
 
-	go m.displayLoop()
+	go monitor.displayLoop()
 }
 
 // Stop the progress bar and system stats loop
-func (m *Monitor) Stop() {
-	close(m.stopChan)
+func (monitor *Monitor) Stop() {
+	close(monitor.stopChan)
 
-	if m.displayTicker != nil {
-		m.displayTicker.Stop()
-		close(m.displayStop)
+	if monitor.displayTicker != nil {
+		monitor.displayTicker.Stop()
+		close(monitor.displayStop)
 	}
 
 	// Show cursor again
 	fmt.Fprint(os.Stderr, "\033[?25h")
 }
 
+// Clears the progress bar
+func (monitor *Monitor) DisplayCleanup() {
+	if monitor.displayTicker != nil {
+		monitor.displayTicker.Stop()
+	}
+
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
+
+	// Set phase to finished
+	elapsed := monitor.config.TotalSeconds
+	stats := monitor.currentStats
+	phase := PhaseFinished
+
+	if monitor.linesRendered > 0 {
+		fmt.Fprintf(os.Stderr, "\033[%dA", monitor.linesRendered)
+	}
+
+	output := monitor.buildDisplay(stats, elapsed, phase)
+	fmt.Fprint(os.Stderr, output)
+
+	// Print waiting message
+	// => Especially the linear capacity exp. can take a while to shutdown publishers/consumers
+	msg := "\nGracefully stopping the publishers/consumers (this may take a moment)..."
+	fmt.Fprint(os.Stderr, msg)
+	monitor.linesRendered = strings.Count(output, "\n") + 1
+}
+
 // Cleanup progress and print final state
-func (m *Monitor) FinishDisplay() {
-	if m.linesRendered > 0 {
-		for i := 0; i < m.linesRendered; i++ {
+func (monitor *Monitor) FinishDisplay() {
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
+
+	if monitor.linesRendered > 0 {
+		for i := 0; i < monitor.linesRendered; i++ {
 			fmt.Fprint(os.Stderr, "\033[2K") // Clear line
-			if i < m.linesRendered-1 {
+			if i < monitor.linesRendered-1 {
 				fmt.Fprint(os.Stderr, "\033[1A") // Move up
 			}
 		}
@@ -135,87 +167,92 @@ func (m *Monitor) FinishDisplay() {
 	}
 
 	// Print completion message
-	elapsed := m.config.TotalSeconds
-	timeStr := formatDuration(elapsed)
-	fmt.Fprintf(os.Stderr, "%s%s✓%s Benchmark completed in %s%s%s\n",
-		colorBold, colorGreen, colorReset,
-		colorCyan, timeStr, colorReset)
+	fmt.Fprintf(os.Stderr, "%s%s✓%s Benchmark finished\n",
+		colorBold, colorGreen, colorReset)
 
 	// Show cursor again
 	fmt.Fprint(os.Stderr, "\033[?25h")
 }
 
 // Return current system statistics
-func (m *Monitor) GetStats() SystemStats {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.currentStats
+func (monitor *Monitor) GetStats() SystemStats {
+	monitor.mutex.RLock()
+	defer monitor.mutex.RUnlock()
+	return monitor.currentStats
 }
 
 // Show progress bar and update the progress display
-func (m *Monitor) displayLoop() {
-	m.render()
+func (monitor *Monitor) displayLoop() {
+	monitor.render()
 	for {
 		select {
-		case <-m.displayStop:
+		case <-monitor.displayStop:
 			return
-		case <-m.displayTicker.C:
-			m.render()
+		case <-monitor.displayTicker.C:
+			monitor.render()
 		}
 	}
 }
 
 // Rneder the entire display of system stats and progress bar
-func (m *Monitor) render() {
-	elapsed := int(time.Since(m.startTime).Seconds())
-	if elapsed > m.config.TotalSeconds {
-		elapsed = m.config.TotalSeconds
+func (monitor *Monitor) render() {
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
+
+	elapsed := int(time.Since(monitor.startTime).Seconds())
+	if elapsed > monitor.config.TotalSeconds {
+		elapsed = monitor.config.TotalSeconds
 	}
 
-	stats := m.GetStats()
+	stats := monitor.currentStats
 	phase := PhaseWarmup
-	if elapsed > m.config.WarmupSeconds {
+	if elapsed >= monitor.config.TotalSeconds {
+		phase = PhaseFinished
+	} else if elapsed > monitor.config.WarmupSeconds {
 		phase = PhaseMeasure
 	}
 
 	// Clear previous render
-	if m.linesRendered > 0 {
+	if monitor.linesRendered > 0 {
 		// Move cursor up and clear lines
-		fmt.Fprintf(os.Stderr, "\033[%dA", m.linesRendered)
+		fmt.Fprintf(os.Stderr, "\033[%dA", monitor.linesRendered)
 	}
 
 	// Build display
-	output := m.buildDisplay(stats, elapsed, phase)
+	output := monitor.buildDisplay(stats, elapsed, phase)
 
 	// Print output
 	fmt.Fprint(os.Stderr, output)
 
 	// Count lines rendered (for next clear)
-	m.linesRendered = strings.Count(output, "\n")
+	monitor.linesRendered = strings.Count(output, "\n")
 }
 
 // Construct the complete display string of system stats and progress bar in two lines
-func (m *Monitor) buildDisplay(stats SystemStats, elapsed int, phase Phase) string {
-	var sb strings.Builder
+func (monitor *Monitor) buildDisplay(stats SystemStats, elapsed int, phase Phase) string {
+	var stringBuilder strings.Builder
 
 	// Line 1: Stats line
-	sb.WriteString(m.buildStatsLine(stats, phase))
-	sb.WriteString("\n")
+	stringBuilder.WriteString(monitor.buildStatsLine(stats, phase))
+	stringBuilder.WriteString("\n")
 
 	// Line 2: Progress bar with time
-	sb.WriteString(m.buildProgressLine(elapsed, phase))
-	sb.WriteString("\n")
+	stringBuilder.WriteString(monitor.buildProgressLine(elapsed, phase))
+	stringBuilder.WriteString("\n")
 
-	return sb.String()
+	return stringBuilder.String()
 }
 
 // Create the system stats display (first line)
-func (m *Monitor) buildStatsLine(stats SystemStats, phase Phase) string {
+func (monitor *Monitor) buildStatsLine(stats SystemStats, phase Phase) string {
 	// Phase indicator
 	var phaseStr string
-	if phase == PhaseWarmup {
+	switch phase {
+	case PhaseFinished:
+		phaseStr = fmt.Sprintf("%s%s● FINISHED%s", colorBold, colorBlue, colorReset)
+	case PhaseWarmup:
 		phaseStr = fmt.Sprintf("%s%s● WARMUP %s", colorBold, colorYellow, colorReset)
-	} else {
+	default:
 		phaseStr = fmt.Sprintf("%s%s● MEASURE%s", colorBold, colorGreen, colorReset)
 	}
 
@@ -227,15 +264,15 @@ func (m *Monitor) buildStatsLine(stats SystemStats, phase Phase) string {
 	// Separator between stats
 	sep := fmt.Sprintf("%s│%s", colorDim, colorReset)
 
-	return fmt.Sprintf("  %s %s %s %s %s %s %s", phaseStr, sep, cpuStr, sep, diskStr, sep, netStr)
+	return fmt.Sprintf("%s %s %s %s %s %s %s", phaseStr, sep, cpuStr, sep, diskStr, sep, netStr)
 }
 
 // Create the progress bar with elapsed & total time
 // on the right side of the progress bar (line 2)
-func (m *Monitor) buildProgressLine(elapsed int, phase Phase) string {
-	total := m.config.TotalSeconds
-	warmup := m.config.WarmupSeconds
-	barWidth := m.config.BarWidth
+func (monitor *Monitor) buildProgressLine(elapsed int, phase Phase) string {
+	total := monitor.config.TotalSeconds
+	warmup := monitor.config.WarmupSeconds
+	barWidth := monitor.config.BarWidth
 
 	// Calculate positions
 	progress := float64(elapsed) / float64(total)
@@ -286,54 +323,54 @@ func (m *Monitor) buildProgressLine(elapsed int, phase Phase) string {
 	bar.WriteString(fmt.Sprintf("%s]%s", colorDim, colorReset))
 
 	// Combine progress bar + percentage + time
-	return fmt.Sprintf("  %s %s%s%s  %s%s%s",
+	return fmt.Sprintf("%s %s%s%s  %s%s%s",
 		bar.String(),
 		colorBold, percentStr, colorReset,
 		colorCyan, timeStr, colorReset)
 }
 
 // Regularly update system stats
-func (m *Monitor) updateLoop() {
+func (monitor *Monitor) updateLoop() {
 	// Update CPU/Disk every 2 seconds
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	m.fetchCPU()
-	m.fetchDisk()
+	monitor.fetchCPU()
+	monitor.fetchDisk()
 
 	// Fetch network in separate goroutine
 	go func() {
 		for {
 			select {
-			case <-m.stopChan:
+			case <-monitor.stopChan:
 				return
 			default:
-				m.fetchNet()
+				monitor.fetchNet()
 			}
 		}
 	}()
 
 	for {
 		select {
-		case <-m.stopChan:
+		case <-monitor.stopChan:
 			return
 		case <-ticker.C:
-			var wg sync.WaitGroup
-			wg.Add(2)
-			go func() { defer wg.Done(); m.fetchCPU() }()
-			go func() { defer wg.Done(); m.fetchDisk() }()
-			wg.Wait()
+			var waitGroup sync.WaitGroup
+			waitGroup.Add(2)
+			go func() { defer waitGroup.Done(); monitor.fetchCPU() }()
+			go func() { defer waitGroup.Done(); monitor.fetchDisk() }()
+			waitGroup.Wait()
 		}
 	}
 }
 
 // Fetch CPU usage via 'top -bn1'
 // Adapted from https://stackoverflow.com/questions/9229333
-func (m *Monitor) fetchCPU() {
+func (monitor *Monitor) fetchCPU() {
 	cmd := exec.Command("top", "-bn1")
 	out, err := cmd.Output()
 	if err != nil {
-		m.updateStat("CPU", " err ")
+		monitor.updateStat("CPU", " err ")
 		return
 	}
 
@@ -341,31 +378,31 @@ func (m *Monitor) fetchCPU() {
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.Contains(line, "Cpu(s)") {
-			re := regexp.MustCompile(`([\d\.]+)\s*id`)
-			matches := re.FindStringSubmatch(line)
+			regex := regexp.MustCompile(`([\d\.]+)\s*id`)
+			matches := regex.FindStringSubmatch(line)
 			if len(matches) > 1 {
 				idleStr := matches[1]
 				idle, err := strconv.ParseFloat(idleStr, 64)
 				if err == nil {
 					usage := 100.0 - idle
-					m.updateStat("CPU", fmt.Sprintf("%5.1f%%", usage))
+					monitor.updateStat("CPU", fmt.Sprintf("%5.1f%%", usage))
 					return
 				}
 			}
 		}
 	}
-	m.updateStat("CPU", "  ─  ")
+	monitor.updateStat("CPU", "  ─  ")
 }
 
 // Fetch disk usage via 'iostat -d 1 2'
-func (m *Monitor) fetchDisk() {
+func (monitor *Monitor) fetchDisk() {
 	cmd := exec.Command("sudo", "iotop", "-b", "-n", "1")
 	out, err := cmd.Output()
 	if err != nil {
 		cmd = exec.Command("iotop", "-b", "-n", "1")
 		out, err = cmd.Output()
 		if err != nil {
-			m.updateDisk("n/a", "n/a")
+			monitor.updateDisk("n/a", "n/a")
 			return
 		}
 	}
@@ -388,17 +425,17 @@ func (m *Monitor) fetchDisk() {
 			w = formatBytes(strings.TrimSpace(matchWrite[1]))
 		}
 
-		m.updateDisk(r, w)
+		monitor.updateDisk(r, w)
 	}
 }
 
 // Fetch network usage via 'ifstat 1 1'
 // Getting only the first interface's stats once (snapshot)
-func (m *Monitor) fetchNet() {
+func (monitor *Monitor) fetchNet() {
 	cmd := exec.Command("ifstat", "1", "1")
 	out, err := cmd.Output()
 	if err != nil {
-		m.updateNet("err", "err")
+		monitor.updateNet("err", "err")
 		time.Sleep(1 * time.Second)
 		return
 	}
@@ -416,39 +453,39 @@ func (m *Monitor) fetchNet() {
 		outVal, err2 := strconv.ParseFloat(fields[1], 64)
 
 		if err1 == nil && err2 == nil {
-			m.updateNet(formatNetSpeed(inVal), formatNetSpeed(outVal))
+			monitor.updateNet(formatNetSpeed(inVal), formatNetSpeed(outVal))
 		}
 	}
 }
 
 // Update a specific metric in the current stats
-func (m *Monitor) updateStat(metric, val string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+func (monitor *Monitor) updateStat(metric, val string) {
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
 	switch metric {
 	case "CPU":
-		m.currentStats.CPUUsage = val
+		monitor.currentStats.CPUUsage = val
 	case "Disk":
-		m.currentStats.DiskRead = val
-		m.currentStats.DiskWrite = ""
+		monitor.currentStats.DiskRead = val
+		monitor.currentStats.DiskWrite = ""
 	case "Net":
-		m.currentStats.NetIn = val
-		m.currentStats.NetOut = ""
+		monitor.currentStats.NetIn = val
+		monitor.currentStats.NetOut = ""
 	}
 }
 
-func (m *Monitor) updateDisk(read, write string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.currentStats.DiskRead = read
-	m.currentStats.DiskWrite = write
+func (monitor *Monitor) updateDisk(read, write string) {
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
+	monitor.currentStats.DiskRead = read
+	monitor.currentStats.DiskWrite = write
 }
 
-func (m *Monitor) updateNet(in, out string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.currentStats.NetIn = in
-	m.currentStats.NetOut = out
+func (monitor *Monitor) updateNet(in, out string) {
+	monitor.mutex.Lock()
+	defer monitor.mutex.Unlock()
+	monitor.currentStats.NetIn = in
+	monitor.currentStats.NetOut = out
 }
 
 // Utility functions

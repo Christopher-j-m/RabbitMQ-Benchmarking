@@ -10,7 +10,7 @@ set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CONFIG_FILE="$SCRIPT_DIR/config.txt"
 
-# Format out, adapted from: https://labex.io/tutorials/shell-how-to-format-strings-in-bash-scripts-400162#adding-color-and-style-to-bash-output
+# Format output colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -193,6 +193,14 @@ manage_vm() {
         fi
     fi
 }
+
+# Start/stop all VMs
+vm_index=1
+for vm in "${FILTERED_VMS[@]}"; do
+    manage_vm "$vm" "$vm_index"
+    ((vm_index++))
+done
+echo ""
 
 # Wait for all operations to complete (or at least in the ongoing process, even if not yet finished)
 if [[ "$OPERATION" == "start" ]]; then

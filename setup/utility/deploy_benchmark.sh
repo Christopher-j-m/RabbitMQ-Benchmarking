@@ -19,16 +19,8 @@ print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
 
-print_warn() {
-    echo -e "${YELLOW}[WARN]${NC} $1"
-}
-
 print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
-}
-
-print_step() {
-    echo -e "${BLUE}[STEP]${NC} $1"
 }
 
 # Check if config file exists
@@ -69,8 +61,11 @@ if [[ ! -d "$BENCHMARK_DIR" ]]; then
     exit 1
 fi
 
+# Build static binary for Linux
 cd "$BENCHMARK_DIR"
-if ! go build -o "$BINARY_NAME" .; then
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o "$BINARY_NAME" .
+
+if [[ $? -ne 0 ]]; then
     print_error "Failed to build Go binary"
     exit 1
 fi

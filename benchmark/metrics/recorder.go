@@ -4,6 +4,7 @@ package metrics
 
 import (
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"math"
 	"os"
@@ -19,16 +20,35 @@ type LatencyBatch struct {
 	Latencies []int64
 }
 
+// All CLI parameters corresponding to the current benchmark for traceability
+type BenchmarkConfig struct {
+	Experiment            string `json:"experiment"`
+	StartTime             string `json:"start_time"`
+	ManagementURL         string `json:"management_url"`
+	User                  string `json:"user"`
+	QueueName             string `json:"queue_name"`
+	QueueCount            int    `json:"queue_count"`
+	QuorumSize            int    `json:"quorum_size"`
+	MsgSizeBytes          int    `json:"msg_size_bytes"`
+	WarmupSeconds         int    `json:"warmup_seconds"`
+	DurationSeconds       int    `json:"duration_seconds"`
+	Publishers            int    `json:"publishers"`
+	Consumers             int    `json:"consumers"`
+	QueueMaxLength        int    `json:"queue_length,omitempty"`
+	QueueOverflowStrategy string `json:"queue_overflow,omitempty"`
+}
+
 // Central component for capturing and aggregating all performance data.
 // It uses a windowed approach to calculate metrics over short intervals and a global
 // approach to determine final statistics after the warmup period.
 // Uses channel-based batching to reduce mutex contention.
 type Recorder struct {
 	filename   string
+	configFile string        // Path to the config file saved alongside the CSV
 	warmup     time.Duration // Duration to skip before counting metrics (to reach steady state)
 	startTime  time.Time     // Time when the benchmark started running
 	windowSize time.Duration // Duration of a single measurement interval (e.g., 1 second)
-	mu         sync.Mutex    // Mutex to protect shared counters and histograms
+	mutex      sync.Mutex    // Mutex to protect shared counters and histograms
 
 	// Histograms
 	// Used for interval-based reporting (written to CSV)
@@ -44,7 +64,7 @@ type Recorder struct {
 	csvWriter *csv.Writer
 	file      *os.File
 	done      chan struct{}  // Channel to signal the background loop to stop
-	wg        sync.WaitGroup // Waits for the background loop to finish
+	waitGroup sync.WaitGroup // Waits for the background loop to finish
 
 	// For summary stats
 	throughputSamples []float64 // Stores throughput (messages/sec) for each interval after warmup
@@ -55,24 +75,32 @@ type Recorder struct {
 	batchWg     sync.WaitGroup
 }
 
-func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
-	// Create results directory if it doesn't exist
-	resultsDir := "results"
+func NewRecorder(experimentName string, clusterSize int, warmupSeconds int) (*Recorder, error) {
+	// Create results directory structure: results/<experiment-name>/<clusterSize>_<timestamp>/
+	timestamp := time.Now().Format("20060102-150405")
+	resultsDir := filepath.Join("results", experimentName, fmt.Sprintf("%d_%s", clusterSize, timestamp))
+
 	if err := os.MkdirAll(resultsDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create results directory: %w", err)
 	}
 
-	// Create CSV file with timestamped name
-	timestamp := time.Now().Format("20060102-150405")
-	filename := filepath.Join(resultsDir, fmt.Sprintf("results_%s_%s.csv", experimentName, timestamp))
+	// Create CSV and config files
+	filename := filepath.Join(resultsDir, "results.csv")
+	configFile := filepath.Join(resultsDir, "results.config")
 
-	f, err := os.Create(filename)
+	if logFileAbsPath, err := filepath.Abs(filename); err == nil {
+		filename = logFileAbsPath
+	}
+	if configFileAbsPath, err := filepath.Abs(configFile); err == nil {
+		configFile = configFileAbsPath
+	}
+
+	csvFile, err := os.Create(filename)
 	if err != nil {
 		return nil, err
 	}
 
-	// CSV Writer
-	w := csv.NewWriter(f)
+	csvWriter := csv.NewWriter(csvFile)
 	header := []string{
 		"elapsed_seconds",
 		"interval_throughput",
@@ -83,20 +111,21 @@ func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
 		"interval_std_dev_us",
 	}
 	// Write the metrics to the CSV header
-	if err := w.Write(header); err != nil {
+	if err := csvWriter.Write(header); err != nil {
 		return nil, err
 	}
-	w.Flush()
+	csvWriter.Flush()
 
 	return &Recorder{
 		filename:   filename,
+		configFile: configFile,
 		warmup:     time.Duration(warmupSeconds) * time.Second,
 		windowSize: 1 * time.Second,
 		// HdrHistograms setup: min=1us, max=10min (600,000,000us), significant figures=3
 		windowHistogram:   hdrhistogram.New(1, 600000000, 3),
 		globalHistogram:   hdrhistogram.New(1, 600000000, 3),
-		csvWriter:         w,
-		file:              f,
+		csvWriter:         csvWriter,
+		file:              csvFile,
 		done:              make(chan struct{}),
 		throughputSamples: make([]float64, 0),
 		latencyChan:       make(chan LatencyBatch, 1000),
@@ -104,37 +133,37 @@ func NewRecorder(experimentName string, warmupSeconds int) (*Recorder, error) {
 }
 
 // Initiates the background loop that periodically flushes windowed metrics to CSV
-func (r *Recorder) Start() {
-	r.startTime = time.Now()
-	r.wg.Add(1)
-	go r.loop()
+func (recorder *Recorder) Start() {
+	recorder.startTime = time.Now()
+	recorder.waitGroup.Add(1)
+	go recorder.loop()
 
 	// Start batch processor routine
-	r.batchWg.Add(1)
-	go r.processBatches()
+	recorder.batchWg.Add(1)
+	go recorder.processBatches()
 }
 
 // Handles incoming latency batches
-func (r *Recorder) processBatches() {
-	defer r.batchWg.Done()
-	for batch := range r.latencyChan {
-		r.mu.Lock()
+func (recorder *Recorder) processBatches() {
+	defer recorder.batchWg.Done()
+	for batch := range recorder.latencyChan {
+		recorder.mutex.Lock()
 		// Exclude measurements during warmup
-		if time.Since(r.startTime) > r.warmup {
+		if time.Since(recorder.startTime) > recorder.warmup {
 			for _, us := range batch.Latencies {
-				r.windowHistogram.RecordValue(us)
-				r.windowMsgCount++
-				r.globalHistogram.RecordValue(us)
-				r.globalMsgCount++
+				_ = recorder.windowHistogram.RecordValue(us)
+				recorder.windowMsgCount++
+				_ = recorder.globalHistogram.RecordValue(us)
+				recorder.globalMsgCount++
 			}
 		}
-		r.mu.Unlock()
+		recorder.mutex.Unlock()
 	}
 }
 
 // RecordLatencyBatch submits a batch of latency measurements (in microseconds) to the recorder.
 // This is more efficient than calling RecordLatency for each measurement.
-func (r *Recorder) RecordLatencyBatch(latenciesUs []int64) {
+func (recorder *Recorder) RecordLatencyBatch(latenciesUs []int64) {
 	if len(latenciesUs) == 0 {
 		return
 	}
@@ -142,63 +171,63 @@ func (r *Recorder) RecordLatencyBatch(latenciesUs []int64) {
 	batch := make([]int64, len(latenciesUs))
 	copy(batch, latenciesUs)
 	select {
-	case r.latencyChan <- LatencyBatch{Latencies: batch}:
+	case recorder.latencyChan <- LatencyBatch{Latencies: batch}:
 	default:
 		// Channel full, fall back to direct recording
-		r.mu.Lock()
+		recorder.mutex.Lock()
 		// Exclude measurements during warmup
-		if time.Since(r.startTime) > r.warmup {
+		if time.Since(recorder.startTime) > recorder.warmup {
 			for _, us := range latenciesUs {
-				r.windowHistogram.RecordValue(us)
-				r.windowMsgCount++
-				r.globalHistogram.RecordValue(us)
-				r.globalMsgCount++
+				_ = recorder.windowHistogram.RecordValue(us)
+				recorder.windowMsgCount++
+				_ = recorder.globalHistogram.RecordValue(us)
+				recorder.globalMsgCount++
 			}
 		}
-		r.mu.Unlock()
+		recorder.mutex.Unlock()
 	}
 }
 
 // Increments the error counter, but only after the warmup period.
-func (r *Recorder) RecordError() {
-	if time.Since(r.startTime) > r.warmup {
-		atomic.AddInt64(&r.errorCount, 1)
+func (recorder *Recorder) RecordError() {
+	if time.Since(recorder.startTime) > recorder.warmup {
+		atomic.AddInt64(&recorder.errorCount, 1)
 	}
 }
 
 // The background timer that triggers periodically to write the current windows metrics to CSV
-func (r *Recorder) loop() {
-	defer r.wg.Done()
-	ticker := time.NewTicker(r.windowSize)
+func (recorder *Recorder) loop() {
+	defer recorder.waitGroup.Done()
+	ticker := time.NewTicker(recorder.windowSize)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-r.done:
+		case <-recorder.done:
 			return
 		case t := <-ticker.C:
-			r.flushWindow(t)
+			recorder.flushWindow(t)
 		}
 	}
 }
 
 // Snapshots the current intervals metrics, writes them to CSV and resets the window
-func (r *Recorder) flushWindow(t time.Time) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (recorder *Recorder) flushWindow(flushTime time.Time) {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
 
-	elapsed := t.Sub(r.startTime).Seconds()
+	elapsed := flushTime.Sub(recorder.startTime).Seconds()
 
 	// Snapshot metrics
-	count := r.windowMsgCount
-	mean := r.windowHistogram.Mean()
-	p50 := r.windowHistogram.ValueAtQuantile(50)
-	p95 := r.windowHistogram.ValueAtQuantile(95)
-	p99 := r.windowHistogram.ValueAtQuantile(99)
-	stdDev := r.windowHistogram.StdDev()
+	count := recorder.windowMsgCount
+	mean := recorder.windowHistogram.Mean()
+	p50 := recorder.windowHistogram.ValueAtQuantile(50)
+	p95 := recorder.windowHistogram.ValueAtQuantile(95)
+	p99 := recorder.windowHistogram.ValueAtQuantile(99)
+	stdDev := recorder.windowHistogram.StdDev()
 
 	// Write to CSV only if warmup period has passed
-	if elapsed > r.warmup.Seconds() {
+	if elapsed > recorder.warmup.Seconds() {
 		record := []string{
 			fmt.Sprintf("%.2f", elapsed),
 			fmt.Sprintf("%d", count),
@@ -208,27 +237,27 @@ func (r *Recorder) flushWindow(t time.Time) {
 			fmt.Sprintf("%d", p99),
 			fmt.Sprintf("%.2f", stdDev),
 		}
-		r.csvWriter.Write(record)
-		r.csvWriter.Flush()
+		_ = recorder.csvWriter.Write(record)
+		recorder.csvWriter.Flush()
 
 		// Store throughput for summary
-		r.throughputSamples = append(r.throughputSamples, float64(count))
+		recorder.throughputSamples = append(recorder.throughputSamples, float64(count))
 	}
 
 	// Reset window histogram
-	r.windowHistogram.Reset()
-	r.windowMsgCount = 0
+	recorder.windowHistogram.Reset()
+	recorder.windowMsgCount = 0
 }
 
 // Stops the background loop and closes the CSV file
-func (r *Recorder) Stop() {
-	close(r.done)
-	r.wg.Wait()
+func (recorder *Recorder) Stop() {
+	close(recorder.done)
+	recorder.waitGroup.Wait()
 
-	close(r.latencyChan)
-	r.batchWg.Wait()
+	close(recorder.latencyChan)
+	recorder.batchWg.Wait()
 
-	r.file.Close()
+	_ = recorder.file.Close()
 }
 
 // The metrics that will be printed out at the end of an experiment for a general overview of the experiment results
@@ -239,39 +268,82 @@ type Summary struct {
 	TotalErrorCount  int64   `json:"total_error_count"`
 }
 
+// Save the benchmark cli params to .config file alongside the results CSV.
+// This allows tracing back what parameters were used for the corresponding results.
+func (recorder *Recorder) WriteConfig(config BenchmarkConfig) error {
+	f, err := os.Create(recorder.configFile)
+	if err != nil {
+		return fmt.Errorf("failed to create config file: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	encoder := json.NewEncoder(f)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(config); err != nil {
+		return fmt.Errorf("failed to write config: %w", err)
+	}
+	return nil
+}
+
+// Return the path to the results CSV file
+func (recorder *Recorder) GetResultsPath() string {
+	return recorder.filename
+}
+
+// Return the path to the config file
+func (recorder *Recorder) GetConfigPath() string {
+	return recorder.configFile
+}
+
 // Calculates the summary metrics from the collected data (excluding warmup).
 // The global histogram is used to get the P99 latency.
-func (r *Recorder) GetSummary() Summary {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+func (recorder *Recorder) GetSummary() Summary {
+	recorder.mutex.Lock()
+	defer recorder.mutex.Unlock()
 
 	var sum float64
-	for _, v := range r.throughputSamples {
-		sum += v
+	for _, value := range recorder.throughputSamples {
+		sum += value
 	}
 
 	mean := 0.0
 	stdDev := 0.0
 
-	if len(r.throughputSamples) > 0 {
+	if len(recorder.throughputSamples) > 0 {
 		// Calculate mean throughput
-		mean = sum / float64(len(r.throughputSamples))
+		mean = sum / float64(len(recorder.throughputSamples))
 
 		var varianceSum float64
-		for _, v := range r.throughputSamples {
-			varianceSum += (v - mean) * (v - mean)
+		for _, value := range recorder.throughputSamples {
+			varianceSum += (value - mean) * (value - mean)
 		}
 
 		// Calculate standard deviation of throughput
-		if len(r.throughputSamples) > 1 {
-			stdDev = math.Sqrt(varianceSum / float64(len(r.throughputSamples)-1))
+		if len(recorder.throughputSamples) > 1 {
+			stdDev = math.Sqrt(varianceSum / float64(len(recorder.throughputSamples)-1))
 		}
 	}
 
 	return Summary{
 		MeanThroughput:   mean,
 		StdDevThroughput: stdDev,
-		GlobalP99Latency: r.globalHistogram.ValueAtQuantile(99),
-		TotalErrorCount:  atomic.LoadInt64(&r.errorCount),
+		GlobalP99Latency: recorder.globalHistogram.ValueAtQuantile(99),
+		TotalErrorCount:  atomic.LoadInt64(&recorder.errorCount),
 	}
+}
+
+// Format the benchmark summary when printed to console
+func (s Summary) String() string {
+	var output string
+
+	if s.MeanThroughput > 0 {
+		output += fmt.Sprintf("%-22s %.2f msg/s\n", "Mean Throughput:", s.MeanThroughput)
+		output += fmt.Sprintf("%-22s %.2f msg/s\n", "StdDev Throughput:", s.StdDevThroughput)
+	}
+	if s.GlobalP99Latency > 0 {
+		output += fmt.Sprintf("%-22s %d µs\n", "Global P99 Latency:", s.GlobalP99Latency)
+	}
+
+	output += fmt.Sprintf("%-22s %d", "Recording Errors:", s.TotalErrorCount)
+	return output
 }

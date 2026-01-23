@@ -28,7 +28,7 @@ func GetExperiment(name string) (Experiment, error) {
 	if factory, ok := registry[name]; ok {
 		return factory(), nil
 	}
-	return nil, fmt.Errorf("unknown experiment: %s", name)
+	return nil, fmt.Errorf("unknown experiment '%s'. Available experiments: %v", name, ListExperiments())
 }
 
 // Returns a list of all registered experiment names.
