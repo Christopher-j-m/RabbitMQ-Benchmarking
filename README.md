@@ -10,6 +10,7 @@
 * [Setup Benchmark Environment](#setup-benchmark-environment)
 * [Benchmark Execution](#benchmark-execution)
 * [Adding New Experiments](#adding-new-experiments)
+* [Measurement Plotting](#measurement-plotting)
 
 ---
 
@@ -22,6 +23,7 @@ The project has been tested on **Ubuntu 22.04** and **24.04**.
 | **Setup** | [Terraform](https://developer.hashicorp.com/terraform/install) (1.14+)<br>[Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli?view=azure-cli-latest) |
 | **Load Generator** | [Go](https://go.dev/dl/) (1.25+) |
 | **Cluster Nodes** | [RabbitMQ](https://www.rabbitmq.com/docs/download) (3.13+) |
+| **Plotter** | [Python](https://www.rabbitmq.com/docs/download) (3.13.7+) |
 
 ---
 
@@ -45,7 +47,10 @@ cd setup/terraform && nano variables.tf
 #### 2. Provisioning
 
 ```bash
+# Only needs to be run once
 terraform init
+
+# Provision Resources
 terraform apply
 
 ```
@@ -133,3 +138,24 @@ To extend the benchmark suite with a new benchmark experiment:
 1. Implement the experiment interface defined in `/experiments/interface.go`.
 2. Register the new experiment in `/experiments/registry.go`.
 3. Rebuild the CLI to automatically make the new experiment available via the `-experiment` parameter.
+
+---
+
+## Measurement Plotting
+
+The raw measurement files from benchmark runs can be plotted using the plotter located at `results/analysis/plotter.py`. This script automatically searches for `results.csv` files in `results/measurements-<experiment-name>/<clusterSize>_<timestamp>` and saves the generated plots in `results/plots`.
+
+**Install Dependencies**
+```bash
+# Recommended: Create Python Environment
+python -m venv venv
+source venv/bin/activate
+
+# Install Dependencies
+pip install -r requirements.txt
+```
+
+**Execution**
+```bash
+python plotter.py
+```
