@@ -1,0 +1,39 @@
+% !TEX root = main.tex
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithmic}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{hyperref} % URLs
+\usepackage{bookmark}
+\hypersetup{colorlinks=true, linkcolor=black, urlcolor=blue, citecolor=black}
+\usepackage[backend=biber,bibencoding=utf8, style=ieee]{biblatex}
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+\addbibresource{main.bib}
+
+\begin{document}
+
+\title{Benchmarking RabbitMQ: How does horizontal scaling influence
+throughput and end-to-end latency across varying cluster sizes?\\
+}
+
+\author{\IEEEauthorblockN{Christopher-Julian Müller}
+\IEEEauthorblockA{\textit{Technische Universität Berlin} \\
+Berlin, Germany \\
+christopher-julian.mueller@campus.tu-berlin.de}
+}
+
+\maketitle
+\input{sections/0_abstract}
+\input{sections/1_introduction}
+\input{sections/2_background}
+\input{sections/3_benchmark}
+\input{sections/4_results}
+\input{sections/5_future_work}
+\input{sections/6_conclusion}
+\newpage
+\printbibliography
+\end{document}

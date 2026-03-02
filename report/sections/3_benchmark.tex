@@ -1,0 +1,73 @@
+\section{Experimental Setup}
+
+\subsection{Infrastructure}
+All experiments were done on Microsoft Azure using virtual machines provisioned via Terraform. The RabbitMQ cluster nodes run on \texttt{Standard\_D4s\_v6} instances (4 vCPUs, 16\,GB RAM) running Ubuntu 24.04 LTS. Besides a 30\,GB Premium SSD as OS disk, each cluster node has a additional 256\,GB Premium SSD v2 (NVMe) disk configured with 10{,}000 IOPS and 600\,MB/s read/write, mounted at the RabbitMQ data directory. The reason for using additional Premium SSD v2 disks is that we can't use them as OS disks, whereas Standard and Premium SSDs below 1\,TB in size use bursting, where I/O performance fluctuates depending on accumulated burst credits. This would pollute benchmark results. On the other hand, provisioning a 1\,TB or larger non-bursting OS disk for every cluster node would be too costly. Premium SSD v2 disks avoid this problem by providing consistent, non-bursting performance at a lower cost.
+
+The load generator runs on a \texttt{Standard\_F32s\_v2} instance (32 vCPUs, 64\,GB RAM). By overprovisioning the load generator's resources, we ensure it does not become a bottleneck itself. All virtual machines are deployed within the same Azure Virtual Network and subnet, so that AMQP traffic between the load generator and the cluster nodes traverses only the internal network, which again removes external interference to our benchmark results.
+
+Cluster formation is automated through a cloud-init script that installs RabbitMQ 4.2.2 and its Erlang runtime, mounts the NVMe data disk and joins each node to a shared cluster using a common Erlang cookie. We benchmarked cluster sizes of 3, 6 and 9 nodes. For each cluster size, the same Terraform configuration was re-applied with only the node count changed, keeping all other parameters the same. Figure~\ref{fig:infrastructure} shows an overview of the infrastructure setup.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{../results/plots/0C_infrastructure.pdf}
+\caption{Infrastructure setup. The load generator connects to all cluster nodes over the internal Azure Virtual Network via AMQP.}
+\label{fig:infrastructure}
+\end{figure}
+
+\subsection{Benchmark Tool}
+We developed a Go CLI tool to execute the benchmark experiments. The tool connects to the RabbitMQ cluster, creates the quorum queues, runs the specified experiment with the given CLI parameters and records per-second metrics to CSV files alongside a JSON configuration file that contains all entered CLI parameters for traceability.
+
+\subsubsection{Latency Measurement}
+Latency is measured end-to-end by embedding a nanosecond-precision timestamp in each message header at publish time. The consumer extracts this timestamp upon delivery and computes the difference to obtain the end-to-end latency, covering the full path from publisher to consumer including Raft replication.
+
+\subsubsection{Throughput Measurement}
+Throughput is derived from publisher confirmations. Each confirmed message increments the throughput counter for the current one-second recording window. This ensures that only messages that have been committed by the Raft quorum are counted.
+
+\subsubsection{Recording and Histograms}
+Our benchmark CLI uses two HDR histograms to capture latency distributions. A \textit{window histogram} is reset every second and written to the results CSV, providing a time series of latency percentiles throughout the experiment. A \textit{global histogram} accumulates all measurements from the end of the warmup period onward and is used to compute the final summary statistics such as the P99 latency. To avoid per-message mutex contention at high message rates, latency values are submitted in batches of 100 through a buffered channel to a separate recording goroutine.
+
+Every experiment begins with a configurable warmup phase during which the cluster reaches a steady state. Measurements taken during warmup are excluded from the recorded results.
+
+\subsection{Experimental Design}
+
+We implemented three experiments to examine different aspects of how horizontal scaling affects RabbitMQ throughput and latency. Table~\ref{tab:parameters} lists the CLI parameters used for each experiment.
+
+\begin{table}[t]
+\centering
+\caption{Benchmark parameters used for each experiment.}
+\label{tab:parameters}
+\footnotesize
+\setlength{\tabcolsep}{6pt}
+\begin{tabular}{@{}l c c c@{}}
+\textbf{Parameter} & \textbf{Linear Capacity} & \textbf{Ideal Latency} & \textbf{Stress Latency} \\
+\hline
+Duration (s)          & 3{,}600  & 3{,}600  & 3{,}600 \\
+Msg.\ size (bytes)    & 1{,}024  & 1{,}024  & 1{,}024 \\
+Publishers            & 160/node & 1        & 10/node + 1 \\
+Consumers             & 0        & 1        & 0 \\
+Queues/node           & 4        & 1        & 4 \\
+Quorum size           & 3 (fixed) & = cluster size & = cluster size \\
+Queue max length      & 1{,}000  & ---       & 1{,}000 \\
+Overflow              & drop-head & ---      & drop-head \\
+\hline
+\end{tabular}
+\end{table}
+
+\subsubsection{Linear Capacity}
+The linear-capacity experiment measures the maximum throughput of the cluster. Multiple quorum queues are created per node and publishers are distributed evenly across all nodes, each with their own AMQP connection to avoid sharing bottlenecks. Publishers use asynchronous confirms with a pipeline depth of up to 2{,}000 messages in flight, allowing the publish rate to be decoupled from confirmation processing.
+
+Since this experiment focuses purely on throughput, we run it without consumers. However, without consumers, messages accumulate in memory on the cluster nodes before they get written to disk. When a node's memory usage exceeds its configured threshold (60\% of RAM by default), RabbitMQ raises a memory alarm and blocks all publishing connections on that node until memory drops below the threshold again~\cite{rmq_memory_docs, rmq_flow_control_docs}. Keeping up with the publish rate through consumers would require a large number of them, which would add significant load to the cluster nodes and take away resources that we want to dedicate entirely to publishers. Instead, we configure each queue with a maximum length and a drop-head overflow strategy, which causes the broker to discard the oldest messages when the queue is full. This keeps memory usage bounded without requiring consumers, allowing us to use all available node resources for maximizing throughput.
+
+As the cluster grows, both the total number of queues and publishers scale proportionally since the queue and publisher parameters in this experiment are per node, so that each node receives a comparable amount of load.
+
+\subsubsection{Ideal Latency}
+To isolate the latency floor of the Raft consensus under minimal contention within this experiment, a single quorum queue is created and both the publisher and consumer connect directly to the queue's leader node. The publisher operates in synchronous confirm mode, waiting for each message to be committed by the quorum before sending the next one. This ensures that each latency sample captures exactly one Raft replication round trip without interference from concurrent messages. The resulting measurements represent the best-case latency for a given cluster size.
+
+\subsubsection{Stress Latency}
+The stress-latency experiment measures how latency degrades when the cluster is under heavy load. It combines the measurement setup of the ideal-latency experiment with background stress traffic similar to the linear-capacity experiment. A single publisher and consumer pair connects to the queue leader and records end-to-end latency using synchronous confirms, while a configurable number of stress publishers flood separate queues across all nodes using asynchronous confirms. The stress traffic competes for CPU, disk I/O and Raft coordination resources without polluting the latency measurements, since the measured and stress traffic use separate queues and connections.
+
+\subsubsection{Quorum Size Strategy}
+
+The experiments use two different quorum size configurations depending on what aspect of horizontal scaling they measure. The linear-capacity experiment fixes the quorum size at 3 (RabbitMQ default) regardless of cluster size. RabbitMQ recommends keeping quorum queues small, as throughput decreases with more members and advises against exceeding 7 members~\cite{rmq_quorum_docs}. In practice, cluster nodes are therefore added to host more small independent quorum groups rather than to increase the quorum size of existing queues. Since both queues and publishers scale per node, the linear-capacity experiment measures whether aggregate throughput increases proportionally with cluster size.
+
+The ideal-latency and stress-latency experiments take the opposite approach and set the quorum size equal to the cluster size (3, 6 or 9). Since both experiments measure a single queue, a fixed quorum size of 3 would leave the additional nodes as passive observers that do not participate in Raft consensus for that queue and would likely produce similar results across all cluster sizes. By making every node a quorum member, our latency measurements capture the coordination cost of the whole cluster rather than just a 3-node subset of it.

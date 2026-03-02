@@ -1,0 +1,120 @@
+\section{Results}
+This section analyzes the measurements collected across three experiments and three cluster sizes (3, 6 and 9 nodes), where each experiment ran for one hour. For configuration details that were used to achieve these measurements, see Section~III.
+
+\subsection{Throughput}
+Table~\ref{tab:throughput} summarizes the throughput results from the linear-capacity experiment. Each cluster size was loaded with 160 publishers distributed evenly across all nodes using asynchronous confirms.
+
+\begin{table}[h]
+\centering
+\caption{Summary of throughput results from the linear-capacity experiment.}
+\label{tab:throughput}
+\begin{tabular}{l r r r}
+\hline
+\textbf{Cluster} & \textbf{Mean (msgs/s)} & \textbf{Scaling Factor} & \textbf{Std Dev} \\
+\hline
+3 Nodes  & 97{,}578  & 1.00$\times$ & 7{,}407  \\
+6 Nodes  & 207{,}129 & 2.12$\times$ & 11{,}803 \\
+9 Nodes  & 307{,}867 & 3.16$\times$ & 11{,}764 \\
+\hline
+\end{tabular}
+\end{table}
+
+The cluster achieves near-linear throughput scaling. Tripling the node count from 3 to 9 yields a 3.16$\times$ improvement, which is slightly super-linear relative to the 3$\times$ increase in cluster nodes. Since the quorum size is fixed at 3, adding nodes introduces new queues and publishers without increasing per-message replication overhead. Only three replicas must acknowledge each write regardless of cluster size, so the additional nodes contribute more publishing capacity without adding consensus overhead.
+
+Per-node throughput remains consistent across all cluster configurations, ranging from approximately 32{,}500 msgs/s per node (3-node) to 34{,}500 msgs/s per node (6-node) and 34{,}200 msgs/s per node (9-node). Since the number of queues and publishers scales proportionally with the node count, each node handles the same workload regardless of cluster size, resulting in relatively consistent per-node throughput. As seen in Figure~\ref{fig:throughput_ts}, the throughput is relatively stable across the one-hour benchmark duration. The coefficient of variation stays below 8\% for all cluster sizes.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{../results/plots/6_throughput_timeseries.pdf}
+\caption{Per-second throughput over the one-hour run for each cluster size, where all cluster configurations maintain a stable throughput.}
+\label{fig:throughput_ts}
+\end{figure}
+
+Figure~\ref{fig:throughput} shows the expected throughput if performance scaled linearly from the 3-node result. The error bars represent standard deviation. The measured values are close to the expected line, with the 6-node and 9-node clusters slightly exceeding it.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{../results/plots/1_throughput_scalability.pdf}
+\caption{Mean throughput per cluster size with standard deviation error bars.}
+\label{fig:throughput}
+\end{figure}
+
+\subsection{Latency Under Ideal Conditions}
+\label{subsec:ideal_latency_results}
+The ideal-latency experiment isolates the Raft consensus latency by using a single publisher and consumer connected directly to the queue leader node. Table~\ref{tab:ideal_latency} summarizes the results. Unlike the throughput experiment, the quorum size equals the cluster size here, so every node participates in consensus.
+
+\begin{table}[h]
+\centering
+\caption{Summary of results from the ideal-latency experiment.}
+\label{tab:ideal_latency}
+\begin{tabular}{l r r r}
+\hline
+\textbf{Cluster} & \textbf{Mean ($\mu$s)} & \textbf{P99 ($\mu$s)} & \textbf{Jitter $\sigma$ ($\mu$s)} \\
+\hline
+3 Nodes & 3{,}474 & 4{,}632 & 666 \\
+6 Nodes & 4{,}054 & 4{,}773 & 607 \\
+9 Nodes & 4{,}228 & 5{,}943 & 871 \\
+\hline
+\end{tabular}
+\end{table}
+
+Mean latency increases with cluster size: +16.7\% from 3 to 6 nodes and +4.3\% from 6 to 9 nodes. This slower increase is consistent with Raft's majority-based commit rule. A message is committed once a majority of members have persisted it and the commit latency is determined by the speed of the fastest majority rather than the slowest node~\cite{raft_paper}. Going from 3 to 6 nodes raises the required quorum from 2 to 4, a significant jump. Going from 6 to 9 nodes raises it from 4 to 5, a smaller relative increase that results in a smaller latency impact.
+
+Figure~\ref{fig:consensus_tax} shows mean and P99 latency for each cluster size, with shaded bands representing standard deviation. While the mean latency bands remain narrow across all sizes, the P99 band grows noticeably wider for the 9-node cluster. This means that the P99 latency increases by only 3.0\% from 3 to 6 nodes but jumps by 24.5\% from 6 to 9 nodes. With a quorum of 5 out of 9, the leader must wait for 5 disk fsyncs (flushes that ensure data is written to disk) across the cluster. With 9 nodes, the chance that at least one follower is temporarily slow increases, which pushes more requests into the P99 range.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{../results/plots/3_consensus_tax.pdf}
+\caption{Mean and P99 latency across cluster sizes. Shaded bands show standard deviation.}
+\label{fig:consensus_tax}
+\end{figure}
+
+\subsection{Latency Under Load}
+\label{subsec:latency_under_load}
+The stress-latency experiment measures how latency degrades when the cluster is under heavy background load. A single publisher with synchronous confirms measures the latency while stress publishers flood the cluster using asynchronous confirms. Table~\ref{tab:stress_latency} summarizes the results.
+
+\begin{table}[h]
+\centering
+\caption{Summary of results from the stress-latency experiment. Coverage shows the percentage of seconds in which at least one latency sample was recorded.}
+\label{tab:stress_latency}
+\begin{tabular}{l r r r}
+\hline
+\textbf{Cluster} & \textbf{Mean (ms)} & \textbf{Coverage} & \textbf{vs. Ideal} \\
+\hline
+3 Nodes & 146.9 & 6.83\% (246/3601) & 42$\times$ \\
+6 Nodes & 388.2 & 2.58\% (93/3602)  & 96$\times$ \\
+9 Nodes & 618.7 & 1.64\% (59/3604)  & 146$\times$ \\
+\hline
+\end{tabular}
+\end{table}
+
+Latency under load is 42$\times$ to 146$\times$ worse than the ideal baseline (see Section~\ref{subsec:ideal_latency_results}). The low measurement coverage is not a measurement issue but a consequence of the experimental design. With synchronous confirms at 150--620\,ms per message, the measured publisher can only send approximately 2--7 messages per second. Since each CSV row aggregates a batch of 100 latency samples, filling one row takes 14--62 seconds, which matches the observed coverage ratios. The consistently low standard deviation within measurement windows (2.7--5.8\,ms) indicates that the system reaches a consistently degraded state rather than fluctuating unpredictably.
+
+The large latency increase is likely caused by Erlang scheduler contention as CPU, disk and network all remain well below capacity (see Section~\ref{subsec:resource_utilization}). The stress publishers create heavy load across all nodes, including the node that hosts the measured queue's leader. Each quorum queue replica is limited to a single CPU core~\cite{rmq_queues_docs}, so the stress queue processes on the leader node compete with the measured queue's process for Erlang scheduler time. Although the stress publishers target separate queues, they slow down the measured queue's Raft process by consuming scheduler capacity on the same node. The RabbitMQ flow control mechanism further throttles publishers when internal buffers fill up~\cite{rmq_flow_control_docs}, adding to the latency increase.
+
+Additionally, latency roughly quadruples from 3 to 9 nodes, growing faster than the cluster size itself. This is partly due to the quorum size increasing with the cluster size (from 3 to 9), which means more nodes must acknowledge each write under contention. The stress-latency results demonstrate that when replication overhead grows with node count, latency degrades more than proportionally.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{../results/plots/2_latency_gradient.pdf}
+\caption{Comparison of ideal (left) vs. stress (right) P99 latency. Note the different y-axis scales and error bars showing the standard deviation.}
+\label{fig:latency_gradient}
+\end{figure}
+\newpage
+
+Figure~\ref{fig:latency_gradient} shows the contrast between ideal and stress P99 latency. The left panel shows ideal latency in the single-digit millisecond range while the right panel shows stress latency reaching hundreds of milliseconds.
+
+\subsection{Resource Utilization}
+\label{subsec:resource_utilization}
+Figure~\ref{fig:resources} shows the cluster-wide average CPU utilization and total disk write throughput during the 9-node linear-capacity run, collected from Azure Monitor metrics. CPU averages around 60--65\% across the nine nodes throughout the benchmark. The total disk write throughput across all nodes is approximately 1{,}200\,MB/s, which corresponds to roughly 133\,MB/s per node and thus well below the 600\,MB/s provisioned per disk. Both metrics remain stable and demonstrate that the consistent throughput observed in Section~IV-A is matched by consistent resource consumption.
+
+Network bandwidth is also not a limiting factor. Each D4s\_v6 node supports up to 12.5\,Gbps of network throughput and Azure Virtual Networks have no additional bandwidth limit. At the observed 9-node throughput of approximately 308{,}000 msgs/s with 1\,KB messages and a quorum size of 3, the total replication traffic is roughly 900\,MB/s across the cluster, or about 100\,MB/s per node, which is approximately 6\% of the per-node network capacity.
+
+Neither CPU, disk I/O nor network are close to saturation, yet the per-node throughput peaks at approximately 34{,}000 msgs/s even after adding more publishers during the experiment. This suggests that the bottleneck lies within RabbitMQ's software architecture rather than the underlying hardware. As discussed in Section~\ref{subsec:latency_under_load}, each quorum queue replica is limited to a single CPU core. With four queues per node, only four leader processes handle the entire publishing load, which likely imposes the throughput ceiling before hardware resources are exhausted.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\columnwidth]{../results/plots/4_resource_saturation.pdf}
+\caption{Cluster-wide CPU utilization and disk write throughput during the 9-node linear-capacity run.}
+\label{fig:resources}
+\end{figure}
