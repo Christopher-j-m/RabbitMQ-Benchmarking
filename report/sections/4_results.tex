@@ -2,7 +2,7 @@
 This section analyzes the measurements collected across three experiments and three cluster sizes (3, 6 and 9 nodes), where each experiment ran for one hour. For configuration details that were used to achieve these measurements, see Section~III.
 
 \subsection{Throughput}
-Table~\ref{tab:throughput} summarizes the throughput results from the linear-capacity experiment. Each cluster size was loaded with 160 publishers distributed evenly across all nodes using asynchronous confirms.
+Table~\ref{tab:throughput} summarizes the throughput results from the linear-capacity experiment. Each node was loaded with 160 publishers using asynchronous confirms, resulting in 480, 960 and 1{,}440 total publishers for the 3, 6 and 9-node clusters respectively.
 
 \begin{table}[h]
 \centering
@@ -19,7 +19,7 @@ Table~\ref{tab:throughput} summarizes the throughput results from the linear-cap
 \end{tabular}
 \end{table}
 
-The cluster achieves near-linear throughput scaling. Tripling the node count from 3 to 9 yields a 3.16$\times$ improvement, which is slightly super-linear relative to the 3$\times$ increase in cluster nodes. Since the quorum size is fixed at 3, adding nodes introduces new queues and publishers without increasing per-message replication overhead. Only three replicas must acknowledge each write regardless of cluster size, so the additional nodes contribute more publishing capacity without adding consensus overhead.
+The cluster achieves approximately linear throughput scaling. Tripling the node count from 3 to 9 yields a 3.16$\times$ improvement, which is consistent with the 3$\times$ increase in cluster nodes. Since the quorum size is fixed at 3, adding nodes introduces new queues and publishers without increasing per-message replication overhead. Only three replicas must acknowledge each write regardless of cluster size, so the additional nodes contribute more publishing capacity without adding consensus overhead.
 
 Per-node throughput remains consistent across all cluster configurations, ranging from approximately 32{,}500 msgs/s per node (3-node) to 34{,}500 msgs/s per node (6-node) and 34{,}200 msgs/s per node (9-node). Since the number of queues and publishers scales proportionally with the node count, each node handles the same workload regardless of cluster size, resulting in relatively consistent per-node throughput. As seen in Figure~\ref{fig:throughput_ts}, the throughput is relatively stable across the one-hour benchmark duration. The coefficient of variation stays below 8\% for all cluster sizes.
 
@@ -49,7 +49,7 @@ The ideal-latency experiment isolates the Raft consensus latency by using a sing
 \label{tab:ideal_latency}
 \begin{tabular}{l r r r}
 \hline
-\textbf{Cluster} & \textbf{Mean ($\mu$s)} & \textbf{P99 ($\mu$s)} & \textbf{Jitter $\sigma$ ($\mu$s)} \\
+\textbf{Cluster} & \textbf{Mean ($\mu$s)} & \textbf{P99 ($\mu$s)} & \textbf{Latency $\sigma$ ($\mu$s)} \\
 \hline
 3 Nodes & 3{,}474 & 4{,}632 & 666 \\
 6 Nodes & 4{,}054 & 4{,}773 & 607 \\
@@ -92,7 +92,7 @@ Latency under load is 42$\times$ to 146$\times$ worse than the ideal baseline (s
 
 The large latency increase is likely caused by Erlang scheduler contention as CPU, disk and network all remain well below capacity (see Section~\ref{subsec:resource_utilization}). The stress publishers create heavy load across all nodes, including the node that hosts the measured queue's leader. Each quorum queue replica is limited to a single CPU core~\cite{rmq_queues_docs}, so the stress queue processes on the leader node compete with the measured queue's process for Erlang scheduler time. Although the stress publishers target separate queues, they slow down the measured queue's Raft process by consuming scheduler capacity on the same node. The RabbitMQ flow control mechanism further throttles publishers when internal buffers fill up~\cite{rmq_flow_control_docs}, adding to the latency increase.
 
-Additionally, latency roughly quadruples from 3 to 9 nodes, growing faster than the cluster size itself. This is partly due to the quorum size increasing with the cluster size (from 3 to 9), which means more nodes must acknowledge each write under contention. The stress-latency results demonstrate that when replication overhead grows with node count, latency degrades more than proportionally.
+Additionally, latency roughly quadruples from 3 to 9 nodes, growing faster than the cluster size itself. This is partly due to the quorum size increasing with the cluster size (from 3 to 9), which means more nodes must acknowledge each write under contention. However, the number of stress publishers also grows with the cluster size (10 per node, so 30 to 90 total), which means that the increased background load and the larger quorum both contribute to the latency degradation. Our experimental design does not isolate these two factors, so the observed increase reflects the combined effect of more replication overhead and more resource contention. The stress-latency results demonstrate that when both quorum size and load grow with node count, latency degrades more than proportionally.
 
 \begin{figure}[h]
 \centering
