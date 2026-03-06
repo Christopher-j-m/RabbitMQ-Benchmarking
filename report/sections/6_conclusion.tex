@@ -1,0 +1,11 @@
+\section{Conclusion}
+
+This paper investigated how horizontal scaling influences throughput and end-to-end latency of RabbitMQ quorum queues across cluster sizes of 3, 6 and 9 nodes. We developed a Go CLI benchmark tool that measures both metrics using publisher confirms and nanosecond-precision timestamps and ran three experiments, each repeated three times, over one-hour measurement windows on Microsoft Azure infrastructure.
+
+The results show that the answer depends on how the cluster is scaled. When quorum size is fixed at 3 and nodes are added to host additional independent quorum groups, throughput scales near-linearly. Tripling the cluster from 3 to 9 nodes yielded a 3.11$\times$ throughput increase with stable per-node throughput around 34{,}000 msgs/s. This shows that RabbitMQ can effectively distribute load across nodes when the quorum size remains constant.
+
+However, when quorum size grows with the cluster, latency increases noticeably. The end-to-end latency floor rose from 3.4\,ms (3 nodes) to 4.3\,ms (9 nodes) in mean and from 4.6\,ms to 6.0\,ms at P99. Under heavy load, latency degraded by 61$\times$ to 146$\times$ compared to the ideal baseline, with the 9-node cluster reaching a mean latency above 600\,ms. These results demonstrate that increasing the quorum size beyond 3 carries a significant and growing latency cost, especially under contention.
+
+We also showed that the throughput ceiling is not caused by hardware limitations. CPU, disk and network utilization all remained well below their provisioned capacity during the 9-node throughput experiment. This points to RabbitMQ's internal architecture as the limiting factor, likely the single Erlang process that serializes Raft log entries per quorum queue.
+
+In summary, horizontal scaling of RabbitMQ is effective for increasing aggregate throughput when quorum size stays fixed, but increasing quorum size with the cluster leads to growing latency costs. Based on our measurements, a quorum size of 3 is effective for throughput-sensitive workloads. However, our experiments only tested quorum sizes of 3, 6 and 9. Intermediate sizes such as 5 or 7, which RabbitMQ documentation lists as recommended upper bounds~\cite{rmq_quorum_docs}, may offer a different trade-off between fault tolerance and latency that remains to be evaluated.
