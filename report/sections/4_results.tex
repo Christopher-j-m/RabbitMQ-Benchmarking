@@ -79,7 +79,7 @@ The stress-latency experiment measures how latency degrades when the cluster is 
 \label{tab:stress_latency}
 \begin{tabular}{l c c r}
 \hline
-\textbf{Cluster} & \textbf{Mean (ms)} & \textbf{P99 vs.\ Ideal P99} & \textbf{Coverage} \\
+\textbf{Cluster} & \textbf{Mean (ms)} & \textbf{Stress P99\,/\,Ideal P99} & \textbf{Coverage} \\
 \hline
 3 Nodes & 140.6 & 61$\times$  & 6.80\% (245/3607) \\
 6 Nodes & 388.2 & 128$\times$ & 2.60\% (94/3608)  \\
@@ -88,7 +88,7 @@ The stress-latency experiment measures how latency degrades when the cluster is 
 \end{tabular}
 \end{table}
 
-Latency under load is 61$\times$ to 146$\times$ worse than the ideal baseline (see Section~\ref{subsec:ideal_latency_results}). The low measurement coverage is not a measurement issue but a consequence of the experimental design. With synchronous confirms at 140--612\,ms per message, the measured publisher can only send approximately 2--7 messages per second. Since each CSV row aggregates a batch of 100 latency samples, filling one row takes 14--62 seconds, which matches the observed coverage ratios. The low inter-run standard deviation of the P99 values (5--27\,ms) shows that the system reaches a consistently degraded state across repeated runs rather than fluctuating unpredictably.
+Latency under load is 61$\times$ to 146$\times$ worse than each cluster size's corresponding ideal P99 (see Section~\ref{subsec:ideal_latency_results}). The low measurement coverage is not a measurement issue but a consequence of the experimental design. With synchronous confirms at 140--612\,ms per message, the measured publisher can only send approximately 2--7 messages per second. Since latency values are batched in groups of 100 before being submitted to the recorder component of the benchmark CLI, a valid CSV entry is only produced approximately every 14--62 seconds, which matches the observed coverage ratios. The low inter-run standard deviation of the P99 values (5--27\,ms) shows that the system reaches a consistently degraded state across repeated runs rather than fluctuating unpredictably.
 
 The large latency increase is likely caused by Erlang scheduler contention as CPU, disk and network all remain well below capacity (see Section~\ref{subsec:resource_utilization}). The stress publishers create heavy load across all nodes, including the node that hosts the measured queue's leader. Each quorum queue replica is limited to a single CPU core~\cite{rmq_queues_docs}, so the stress queue processes on the leader node compete with the measured queue's process for Erlang scheduler time. Although the stress publishers target separate queues, they slow down the measured queue's Raft process by consuming scheduler capacity on the same node. The RabbitMQ flow control mechanism further throttles publishers when internal buffers fill up~\cite{rmq_flow_control_docs}, adding to the latency increase.
 
@@ -106,7 +106,7 @@ Figure~\ref{fig:latency_gradient} shows the contrast between ideal and stress P9
 
 \subsection{Resource Utilization}
 \label{subsec:resource_utilization}
-Figure~\ref{fig:resources} shows the cluster-wide average CPU utilization and total disk write throughput during the 9-node linear-capacity run, collected from Azure Monitor metrics. CPU averages around 60--65\% across the nine nodes throughout the benchmark. The total disk write throughput across all nodes is approximately 1{,}200\,MB/s, which corresponds to roughly 133\,MB/s per node and thus well below the 600\,MB/s provisioned per disk. Both metrics remain stable and demonstrate that the consistent throughput observed in Section~IV-A is matched by consistent resource consumption.
+Figure~\ref{fig:resources} shows the cluster-wide average CPU utilization and total disk write throughput during a representative 9-node linear-capacity run, exported from Azure Monitor metrics, where all benchmark runs showed similar values. CPU averages around 60--65\% across the nine nodes throughout the benchmark. The total disk write throughput across all nodes is approximately 1{,}200\,MB/s, which corresponds to roughly 133\,MB/s per node and thus well below the 600\,MB/s provisioned per disk. Both metrics remain stable and demonstrate that the consistent throughput observed in Section~IV-A is matched by consistent resource consumption.
 
 Network bandwidth is also not a limiting factor. Each D4s\_v6 node supports up to 12.5\,Gbps of network throughput and Azure Virtual Networks have no additional bandwidth limit. At the observed 9-node throughput of approximately 305{,}000 msgs/s with 1\,KB messages and a quorum size of 3, the total replication traffic is roughly 900\,MB/s across the cluster, or about 100\,MB/s per node, which is approximately 6\% of the per-node network capacity.
 
@@ -115,6 +115,6 @@ Neither CPU, disk I/O nor network are close to saturation, yet the per-node thro
 \begin{figure}[h]
 \centering
 \includegraphics[width=\columnwidth]{../results/plots/4_resource_saturation.pdf}
-\caption{Cluster-wide CPU utilization and disk write throughput during a single 9-node linear-capacity run.}
+\caption{Cluster-wide CPU utilization and disk write throughput during a representative 9-node linear-capacity run.}
 \label{fig:resources}
 \end{figure}

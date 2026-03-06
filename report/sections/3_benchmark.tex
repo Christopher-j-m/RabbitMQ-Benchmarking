@@ -26,7 +26,7 @@ Throughput is derived from publisher confirmations. Each confirmed message incre
 \subsubsection{Recording and Histograms}
 Our benchmark CLI uses two HDR histograms to capture latency distributions. A \textit{window histogram} is reset every second and written to the results CSV, providing a time series of latency percentiles throughout the experiment. A \textit{global histogram} accumulates all measurements from the end of the warmup period onward and is used to compute the final summary statistics such as the P99 latency. To avoid per-message mutex contention at high message rates, latency values are submitted in batches of 100 through a buffered channel to a separate recording goroutine.
 
-The benchmark CLI supports a configurable warmup phase during which measurements are excluded from the recorded results. In our experiments, we did not use the warmup parameter and instead filtered out rows during the analysis stage.
+The benchmark CLI supports a configurable warmup phase during which measurements are excluded from the recorded results. In our experiments, we did not use the warmup parameter and instead filtered out rows during the analysis stage, excluding rows where throughput was below 1{,}000\,msgs/s for throughput experiments and rows with zero recorded latency samples for latency experiments.
 
 \subsection{Experimental Design}
 
