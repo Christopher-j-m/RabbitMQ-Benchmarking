@@ -15,7 +15,7 @@ Cluster formation is automated through a cloud-init script that installs RabbitM
 \end{figure}
 
 \subsection{Benchmark Tool}
-We developed a Go CLI tool to execute the benchmark experiments. The tool connects to the RabbitMQ cluster, creates the quorum queues, runs the specified experiment with the given CLI parameters and records per-second metrics to CSV files alongside a JSON configuration file that contains all entered CLI parameters for traceability.
+We developed a Go CLI tool to execute the benchmark experiments.\footnote{\url{https://github.com/Christopher-j-m/RabbitMQ-Benchmarking}.} The tool connects to the RabbitMQ cluster, creates the quorum queues, runs the specified experiment with the given CLI parameters and records per-second metrics to CSV files alongside a JSON configuration file that contains all entered CLI parameters for traceability.
 
 \subsubsection{Latency Measurement}
 Latency is measured end-to-end by embedding a nanosecond-precision timestamp in each message header at publish time. The consumer extracts this timestamp upon delivery and computes the difference to obtain the end-to-end latency, covering the full path from publisher to consumer including Raft replication.
@@ -32,7 +32,7 @@ The benchmark CLI supports a configurable warmup phase during which measurements
 
 We implemented three experiments to examine different aspects of how horizontal scaling affects RabbitMQ throughput and latency. Each experiment was repeated three times for each cluster size to ensure repeatability. Table~\ref{tab:parameters} lists the CLI parameters used for each experiment.
 
-\begin{table}[t]
+\begin{table}[!ht]
 \centering
 \caption{Benchmark parameters used for each experiment.}
 \label{tab:parameters}
