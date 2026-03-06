@@ -16,7 +16,7 @@ The quorum for a cluster of size $n$ is $\lfloor n/2 \rfloor + 1$. This means a 
 
 \begin{figure}[!ht]
 \centering
-\includegraphics[width=1.04\columnwidth]{../results/plots/0B_raft_replication.pdf}
+\includegraphics[width=1.04\columnwidth]{../results/plots/0A_raft_replication.pdf}
 \caption{Raft replication sequence for a 6-node quorum queue. The leader appends the message to its WAL, replicates to all followers and confirms to the publisher once a quorum (4 of 6) has persisted the entry.}
 \label{fig:raft_replication}
 \end{figure}
